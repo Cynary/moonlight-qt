@@ -566,8 +566,8 @@ External high-speed capture remains the authority for validating a suspected
 hardware/driver failure.
 
 Set `MOONLIGHT_VRR_DEEP_TRACE=1` for native flip diagnosis. It adds native-call
-timing, DXGI present/frame-statistics values, and `gpu_ready_*` timing that
-proves queued rendering completed inside preparation and before `Present()`.
+timing, backend presentation values, and `gpu_ready_*` timing that proves
+queued rendering completed inside preparation and before the native submit.
 The CPU return from the fence wait is only an upper bound on the actual GPU
 completion instant. D3D11 records the fence-signal start and a bracketed
 `GetCompletedValue()` poll, including the exact target and completed values.
@@ -592,9 +592,17 @@ D3D11 reuses the previous post-Present observation for the diagnostic
 before-state, so deep mode does not add synchronous DXGI queries around
 `Present()`; the essential post-Present submission/latch queries are collected
 in both modes.
-Diagnostic readiness requires exact `S_OK` results for both fence HRESULTs,
-`WAIT_OBJECT_0`, valid GPU-ready timing, and a reproducible completion bracket
-on every presented frame. It rejects any row where the
+On Linux Vulkan, the same `gpu_ready_*` columns carry the libplacebo
+`pl_tex_poll(..., 0)` observation around the acquired swapchain texture. Vulkan
+leaves D3D11 signal/event/fence values unset; result 0 means the texture became
+idle, 1 is the bounded timeout (50 ms or the poll-iteration guard), and 2 is
+an interrupted or failed observation.
+Only result 0 sets `gpu_ready_timing_valid`; failed rows retain their raw poll
+timestamps for diagnosis and never enter readiness training. Replay audits
+these rows with Vulkan-specific result, ordering, and completion-bound rules.
+For D3D11, diagnostic readiness requires exact `S_OK` results for both fence
+HRESULTs, `WAIT_OBJECT_0`, valid GPU-ready timing, and a reproducible completion
+bracket on every presented frame. It rejects any row where the
 signal/poll/wait order falls outside preparation, the recorded lower/upper
 bound cannot be derived from the raw observations, or the reported wait
 duration disagrees with its start/end timestamps. It likewise verifies that

@@ -1468,7 +1468,10 @@ bool PlVkRenderer::waitForVrrGpuReady(VrrPresentFeedback& feedback)
                          "Vulkan VRR GPU readiness poll exceeded %u iterations",
                          kVulkanGpuReadyPollLimit);
             feedback.gpuReadyWaitResultValid = true;
-            feedback.gpuReadyWaitResult = 2;
+            // Treat the iteration guard as the same bounded timeout outcome
+            // as the elapsed-time limit. Result 2 remains reserved for a
+            // lifecycle interruption or an actual failed GPU observation.
+            feedback.gpuReadyWaitResult = 1;
             feedback.gpuReadyPollEndUs = nowUs;
             feedback.gpuReadyTimeUs = nowUs;
             feedback.gpuReadyTimingValid = false;
@@ -1588,8 +1591,14 @@ VrrPrepareResult PlVkRenderer::prepareFrame(AVFrame* frame,
     if (!waitForVrrGpuReady(result.feedback)) {
         m_VrrGpuReadyFeedback = result.feedback;
         result.cancellationMaySubmit = m_HasPendingSwapchainFrame;
-        if (m_Vulkan != nullptr && m_Vulkan->gpu != nullptr &&
-                pl_gpu_is_failed(m_Vulkan->gpu)) {
+        const bool gpuReadinessTimedOut =
+            result.feedback.gpuReadyWaitResultValid &&
+            result.feedback.gpuReadyWaitResult == 1;
+        const bool gpuFailed =
+            m_Vulkan != nullptr && m_Vulkan->gpu != nullptr &&
+            pl_gpu_is_failed(m_Vulkan->gpu);
+        if (gpuReadinessTimedOut || gpuFailed) {
+            m_VrrFallbackReason = VrrFallbackReason::AdaptivePresentationUnavailable;
             queueRenderDeviceReset();
         }
         return result;
