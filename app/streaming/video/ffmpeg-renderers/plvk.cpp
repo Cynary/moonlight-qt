@@ -24,6 +24,7 @@ extern "C" {
 
 #include <vector>
 #include <set>
+#include <thread>
 
 #ifndef VK_KHR_video_decode_av1
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
@@ -64,6 +65,16 @@ public:
 };
 
 namespace {
+
+#ifdef Q_OS_LINUX
+// Keep the Vulkan completion observation bounded. A frame that cannot become
+// idle inside this interval is a renderer/device fault, not an invitation to
+// hold the pacer indefinitely. The shared controller learns only successful
+// waits, so this bound cannot turn a sustained GPU overload into unbounded
+// playout latency.
+constexpr uint64_t kVulkanGpuReadyTimeoutUs = 50000;
+constexpr unsigned int kVulkanGpuReadyPollLimit = 100000;
+#endif
 
 const char* vulkanPresentModeName(VkPresentModeKHR mode)
 {
@@ -1385,6 +1396,107 @@ uint64_t PlVkRenderer::waitForDecode(AVFrame* frame)
 #endif
 }
 
+bool PlVkRenderer::waitForVrrGpuReady(VrrPresentFeedback& feedback)
+{
+#ifdef Q_OS_LINUX
+    if (m_Vulkan == nullptr || m_Vulkan->gpu == nullptr ||
+            m_SwapchainFrame.fbo == nullptr ||
+            m_VrrWindowChangePending.load() || m_VrrSuspended) {
+        return false;
+    }
+
+    // pl_tex_poll() is libplacebo's image-local completion primitive. It
+    // returns true while the texture still has outstanding GPU references and
+    // false once those references have completed. It does not provide a GPU
+    // timestamp, so the CPU timestamps below deliberately describe an
+    // observation bracket rather than pretending to be an exact completion
+    // instant.
+    feedback.gpuReadyAttempted = true;
+    const uint64_t waitStartUs = LiGetMicroseconds();
+    feedback.gpuReadyPollStartUs = waitStartUs;
+    feedback.gpuReadyWaitStartUs = waitStartUs;
+
+    bool pending = pl_tex_poll(m_Vulkan->gpu, m_SwapchainFrame.fbo, 0);
+    uint64_t nowUs = LiGetMicroseconds();
+    unsigned int pollCount = 1;
+    while (pending) {
+        if (m_VrrWindowChangePending.load() || m_VrrSuspended ||
+                pl_gpu_is_failed(m_Vulkan->gpu)) {
+            feedback.gpuReadyWaitResultValid = true;
+            // Result 2 is the shared diagnostic value for an interrupted or
+            // failed observation. It is intentionally distinct from the
+            // timeout value (1) and from successful completion (0).
+            feedback.gpuReadyWaitResult = 2;
+            feedback.gpuReadyPollEndUs = nowUs;
+            feedback.gpuReadyTimeUs = nowUs;
+            // The timestamps are retained for failure diagnosis, but the
+            // timing-valid bit means a completed readiness sample, matching
+            // the D3D11 presenter contract and keeping failed waits out of
+            // the training distribution.
+            feedback.gpuReadyTimingValid = false;
+            return false;
+        }
+
+        if (nowUs >= waitStartUs &&
+                nowUs - waitStartUs >= kVulkanGpuReadyTimeoutUs) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Vulkan VRR GPU readiness poll timed out after %llu us",
+                         static_cast<unsigned long long>(nowUs - waitStartUs));
+            feedback.gpuReadyWaitResultValid = true;
+            feedback.gpuReadyWaitResult = 1;
+            feedback.gpuReadyPollEndUs = nowUs;
+            feedback.gpuReadyTimeUs = nowUs;
+            feedback.gpuReadyTimingValid = false;
+            return false;
+        }
+
+        // A zero-time poll never blocks in libplacebo. Yield between polls so
+        // the decoder and compositor can make progress while retaining a
+        // short completion-observation interval for the readiness predictor.
+        std::this_thread::yield();
+        pending = pl_tex_poll(m_Vulkan->gpu, m_SwapchainFrame.fbo, 0);
+        nowUs = LiGetMicroseconds();
+        // A completion observed on the final allowed poll is still a valid
+        // success. Only reject a live texture that remains pending after the
+        // bound, otherwise the limit would turn an exact boundary completion
+        // into a false renderer failure.
+        if (!pending) {
+            break;
+        }
+        if (++pollCount >= kVulkanGpuReadyPollLimit) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Vulkan VRR GPU readiness poll exceeded %u iterations",
+                         kVulkanGpuReadyPollLimit);
+            feedback.gpuReadyWaitResultValid = true;
+            feedback.gpuReadyWaitResult = 2;
+            feedback.gpuReadyPollEndUs = nowUs;
+            feedback.gpuReadyTimeUs = nowUs;
+            feedback.gpuReadyTimingValid = false;
+            return false;
+        }
+    }
+
+    if (pl_gpu_is_failed(m_Vulkan->gpu)) {
+        feedback.gpuReadyWaitResultValid = true;
+        feedback.gpuReadyWaitResult = 2;
+        feedback.gpuReadyPollEndUs = nowUs;
+        feedback.gpuReadyTimeUs = nowUs;
+        feedback.gpuReadyTimingValid = false;
+        return false;
+    }
+
+    feedback.gpuReadyPollEndUs = nowUs;
+    feedback.gpuReadyTimeUs = nowUs;
+    feedback.gpuReadyWaitResultValid = true;
+    feedback.gpuReadyWaitResult = 0;
+    feedback.gpuReadyTimingValid = nowUs >= waitStartUs;
+    return feedback.gpuReadyTimingValid;
+#else
+    (void) feedback;
+    return false;
+#endif
+}
+
 VrrPrepareResult PlVkRenderer::prepareFrame(AVFrame* frame,
                                             uint64_t decodeBoundary)
 {
@@ -1410,6 +1522,10 @@ VrrPrepareResult PlVkRenderer::prepareFrame(AVFrame* frame,
         result.cancellationMaySubmit = m_HasPendingSwapchainFrame;
         return result;
     }
+
+    // Clear readiness evidence only after the duplicate-frame guard above;
+    // an already-acquired frame keeps its telemetry until present/cancel.
+    m_VrrGpuReadyFeedback = {};
 
     // A size/display callback arrives on the main thread. Clear the current
     // generation before acquisition; a concurrent new callback remains set
@@ -1468,9 +1584,23 @@ VrrPrepareResult PlVkRenderer::prepareFrame(AVFrame* frame,
         return result;
     }
 
+#ifdef Q_OS_LINUX
+    if (!waitForVrrGpuReady(result.feedback)) {
+        m_VrrGpuReadyFeedback = result.feedback;
+        result.cancellationMaySubmit = m_HasPendingSwapchainFrame;
+        if (m_Vulkan != nullptr && m_Vulkan->gpu != nullptr &&
+                pl_gpu_is_failed(m_Vulkan->gpu)) {
+            queueRenderDeviceReset();
+        }
+        return result;
+    }
+#endif
+
     m_VrrFramePrepared = true;
     result.prepared = true;
     result.cancellationMaySubmit = true;
+    result.sourceFrameReusable = true;
+    m_VrrGpuReadyFeedback = result.feedback;
     return result;
 }
 
@@ -1503,7 +1633,8 @@ VrrPresentFeedback PlVkRenderer::presentAdaptive(const VrrPresentRequest& reques
     const uint64_t submissionTimeUs = LiGetMicroseconds();
     const bool submitted = submitPendingSwapchainFrame();
 
-    VrrPresentFeedback feedback;
+    VrrPresentFeedback feedback = m_VrrGpuReadyFeedback;
+    m_VrrGpuReadyFeedback = {};
     feedback.nativeBackendValid = true;
     feedback.nativeBackend = VrrNativePresentationBackend::Vulkan;
     feedback.nativePresentResultValid = true;
@@ -1584,12 +1715,17 @@ bool PlVkRenderer::cancelVrrFrame()
             queueRenderDeviceReset();
         }
     }
+    // Direct cleanup/replacement callers do not consume a VrrPresentFeedback;
+    // never let readiness evidence from the abandoned image leak into a later
+    // frame. cancelFrame() copies this member before reaching here.
+    m_VrrGpuReadyFeedback = {};
     return hadPendingFrame && submitted;
 }
 
 VrrPresentFeedback PlVkRenderer::cancelFrame()
 {
-    VrrPresentFeedback feedback;
+    VrrPresentFeedback feedback = m_VrrGpuReadyFeedback;
+    m_VrrGpuReadyFeedback = {};
     feedback.cancelled = true;
     const bool nativeSubmitAttempted = m_HasPendingSwapchainFrame;
     const uint64_t submissionTimeUs = LiGetMicroseconds();

@@ -98,6 +98,7 @@ private:
     bool submitPendingSwapchainFrame();
     void finishVrrRenderTiming();
     bool cancelVrrFrame();
+    bool waitForVrrGpuReady(VrrPresentFeedback& feedback);
     void queueRenderDeviceReset();
 
     bool createSwapchain(int depth);
@@ -168,6 +169,11 @@ private:
     bool m_VrrFramePrepared = false;
     bool m_VrrRenderSucceeded = false;
     bool m_VrrRenderTimingActive = false;
+    // Readiness evidence from the current prepared frame is copied into the
+    // eventual present or cancellation result. Vulkan may have to submit an
+    // acquired image to abandon it, and the worker must not lose the GPU wait
+    // that happened before that neutral submission.
+    VrrPresentFeedback m_VrrGpuReadyFeedback;
     uint64_t m_PresentationId = 0;
     bool m_LoggedPresentationFeedback = false;
 #ifdef Q_OS_LINUX

@@ -187,6 +187,18 @@ sample. `gpu_readiness_lead_us` and `gpu_readiness_applied_us` make the decision
 and measured wait visible in schema-5 traces. `playout_capacity_telemetry=1`
 also records unclamped demand when the cadence cap limits the applied buffer.
 
+Linux Vulkan uses the same bounded readiness estimator. After flushing the
+render queue, it polls the acquired libplacebo swapchain texture with
+`pl_tex_poll(..., 0)` until its GPU references are idle, with a 50 ms / 100,000
+poll bound. The shared `gpu_ready_wait_*` and completion-bound fields describe
+that CPU observation bracket; D3D11 signal/event/fence fields remain unset.
+Successful polls release the decoder surface before target waiting, while a
+timeout, device failure, or lifecycle interruption abandons the image and is
+never used as a readiness-training sample. Failed poll timestamps remain
+available for diagnosis but leave `gpu_ready_timing_valid=0`. Replay applies
+Vulkan-specific poll/result validation instead of the D3D11 HRESULT/fence
+audit.
+
 Historical production sets `playout_prediction_only=1`: readiness prediction controls both
 growth and release, independently of display feedback. Required protection is
 readiness p99.95 plus any recent readiness-miss boost, with 3 ms of headroom.
@@ -747,8 +759,9 @@ The summary's `capture.telemetry_coverage` object distinguishes unavailable
 native diagnostics from valid zero-duration measurements. Deep-trace native
 Present and GPU-readiness distributions contain only samples whose matching
 validity bit was recorded. GPU completion is reported as lower/upper bounds
-and an uncertainty distribution, separate from the exact CPU fence-wait
-duration. The same object reports exact fence/wait result counts, partial
+and an uncertainty distribution, separate from the exact CPU completion-wait
+duration (a D3D11 fence wait or Vulkan texture poll). The same object reports
+exact fence/wait result counts, partial
 attempts, stage-relationship failures, and presented-frame exact-success
 coverage. `diagnostic_readiness` applies explicit gates rather
 than treating a successful process exit as proof: schema/sequence integrity,

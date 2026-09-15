@@ -10,9 +10,9 @@ Allow tearing comparison setting (2026-09-12),
 client-processing,
 vrr14-style compact stats reporting, restored Reduce judder, reconnect
 trace preservation, motion cadence telemetry, hard buffer ceiling, AMD low-latency decode request, observed-latency trace diagnostics, and removal of the latency oscillation test,
-inspected 2026-09-14; now includes responsive readiness revision 4, desktop-rate isolation,
-fence-value-verified Windows readiness waits, and bounded GPU-readiness
-head-start adaptation. The latency
+inspected 2026-09-15; now includes responsive readiness revision 4, desktop-rate isolation,
+fence-value-verified Windows readiness waits, bounded Vulkan texture-completion
+polling, and bounded GPU-readiness head-start adaptation. The latency
 presets and persistent Vulkan presentation changes remain active.
 Windows and Linux share one production queue policy: mean absolute client-added
 interval error over one second with a profile-selected tolerance (0.5 ms for Low
@@ -24,10 +24,11 @@ preset-duration quality score. Low Latency / Balanced Target / Smooth seek
 queue-capacity safety bound.
 Live sessions also cap the preset allowance against the fitted source period,
 not only the negotiated stream rate. Successful Windows present-ready fence
-waits feed a separate bounded readiness lead: a recent p99 wait plus 500 us,
-clamped to 12 ms and one source period. That lead advances only the render-start
-deadline; it does not move the source presentation target or claim that the
-GPU will complete on time. Explicit captured parameters keep the new controls
+waits and Linux Vulkan output-texture completion polls feed a separate bounded
+readiness lead: a recent p99 wait plus 500 us, clamped to 12 ms and one source
+period. That lead advances only the render-start deadline; it does not move the
+source presentation target or claim that the GPU will complete on time.
+Explicit captured parameters keep the new controls
 disabled unless the trace records them, preserving exact replay of older captures.
 The minimum remains 1 ms (subject to capacity). Five-minute version-20 raw
 readiness calibration is diagnostic only and cannot inflate the live request.
@@ -918,12 +919,14 @@ resetting the codec merely because an image was not presented.
    acquisition belong inside this measured preparation interval; intentional
    target waiting does not. D3D11 keeps its mode selection at Present; Linux
    Vulkan keeps the swapchain's startup-selected mode.
-7. On a successful D3D11 present-ready wait, feed the measured fence-wait
-   interval into the controller's bounded readiness history. Future frames may
-   start rendering earlier by the learned lead; the source target and native
-   latch decision are unchanged. Failed waits and incomplete timing are not
-   training samples. The worker also removes this explicit GPU wait from the
-   generic preparation duration so one stall cannot inflate both budgets.
+7. On a successful renderer completion wait, feed the measured interval into
+   the controller's bounded readiness history. D3D11 uses a present-ready
+   fence; Linux Vulkan polls the acquired libplacebo swapchain texture after
+   flushing its render commands. Future frames may start rendering earlier by
+   the learned lead; the source target and native latch decision are unchanged.
+   Failed waits and incomplete timing are not training samples. The worker also
+   removes this explicit GPU wait from the generic preparation duration so one
+   stall cannot inflate both budgets.
 8. Handle preparation failure/cancellation. If the presenter reports
    `sourceFrameReusable`, release the decoder surface before the target wait.
 9. Wait for the target, then enforce the controller's currently applicable
@@ -1641,6 +1644,22 @@ when the dormant SteamOS experiment is enabled, according to exposed surface
 capabilities. With Allow tearing disabled, all qualified surfaces prefer
 supported Mailbox; missing Mailbox selects fixed FIFO pacing instead.
 
+After rendering a VRR frame, Linux Vulkan flushes the libplacebo queue and
+polls the acquired `pl_swapchain_frame.fbo` with `pl_tex_poll(..., 0)` until
+the texture has no outstanding GPU references. This image-local completion
+check proves that rendering has finished reading the decoder surface before
+the worker releases that AVFrame and waits for the presentation target. The
+poll is bounded at 50 ms and 100,000 zero-time observations; a timeout,
+device failure, or display-lifecycle interruption abandons the image and
+requests the normal renderer recovery path. Vulkan has no GPU timestamp here:
+`gpu_ready_poll_start_us` through `gpu_ready_time_us` are a CPU observation
+bracket and the derived completion uncertainty is recorded as such. D3D11
+signal/event/fence fields remain unset on Vulkan rows, while the shared wait
+result, timing, and completion-bound fields feed the same readiness estimator
+and replay audits. Failed polls keep their raw start/end timestamps and result
+for diagnosis but leave `gpu_ready_timing_valid` clear, so they cannot become
+readiness-training samples or inflate the applied-wait distribution.
+
 The selected adaptive mode remains immutable for the lifetime of one persistent
 swapchain. Per-frame controller requests never destroy or recreate that chain.
 Persistent Mailbox provides synchronized, stale-image-replacing presentation,
@@ -1749,8 +1768,8 @@ Rows carry frame identity, receive/assembly/decode times, queue lifecycle,
 controller decisions and resolved parameters, preparation/wait/submission
 timings, native results and IDs, GPU readiness bounds, and optional deep/raster
 evidence. Schema-5 decision rows now include `gpu_readiness_lead_us`; outcome
-diagnostics include `gpu_readiness_applied_us` when a completed present-ready
-wait was measured. Terminal rows may be emitted outside the controller-owning worker
+diagnostics include `gpu_readiness_applied_us` when a completed D3D11 fence or
+Linux Vulkan texture-poll wait was measured. Terminal rows may be emitted outside the controller-owning worker
 and intentionally lack its live diagnostic state.
 
 The optional schema-5 diagnostic extension records `decoder_output_us` separately
@@ -1777,7 +1796,9 @@ or existing field meanings, so older replay readers can ignore the extension.
 
 Presenter-reported submission time is used only when valid inside the observed
 native-operation bracket; otherwise the worker boundary is used. Present return
-time is not silently promoted into scanout time.
+time is not silently promoted into scanout time. Vulkan readiness polling is
+reported as a completion observation bracket rather than a hardware timestamp;
+the shared trace fields retain that distinction for replay.
 
 ### 13.2 What exact replay means
 
@@ -1803,8 +1824,11 @@ events.
 
 Current-policy replay and queue simulation select the shared prediction policy
 regardless of native backend. Exact replay continues to use recorded parameters,
-including historical Linux thresholded-event demand. The strict Windows/raster
-diagnostic gate is unchanged and may reject otherwise reproducible Vulkan captures.
+including historical Linux thresholded-event demand. Replay audits Vulkan's
+texture-poll readiness rows with backend-appropriate result and completion-bound
+rules; the separate strict Windows/raster diagnostic gate remains backend-specific
+and may still reject otherwise reproducible Vulkan captures when its Windows-only
+display evidence is absent.
 
 ### 13.3 Counterfactual model limits
 

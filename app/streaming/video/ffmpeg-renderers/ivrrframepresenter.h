@@ -232,14 +232,17 @@ struct VrrPresentFeedback {
     uint64_t frameStatsBeforePresentRefreshSequence = 0;
     uint64_t frameStatsBeforeRefreshSequence = 0;
     // Optional renderer-readiness timing. A backend that queues GPU work in
-    // prepareFrame() reports the CPU wait around its completion fence. The
+    // prepareFrame() reports the CPU wait around its completion primitive. The
     // wait return is only an upper bound on the actual GPU completion instant.
     // The signal/poll bracket below lets replay derive a conservative lower
     // bound too, rather than pretending the CPU wake timestamp is exact. The
-    // exact target/completed fence values make the completed-before-wait
-    // interpretation independently auditable. Exact native operation results
-    // remain available on failed preparation rows too, so a fence setup
-    // failure cannot collapse into an unexplained generic cancellation.
+    // D3D11 signal/event and fence-value fields are populated only by its
+    // native fence path; Vulkan uses the poll timestamps and leaves those
+    // fields unavailable. Exact native operation results remain available on
+    // failed preparation rows too, so a readiness failure cannot collapse into
+    // an unexplained generic cancellation. `gpuReadyTimingValid` is true only
+    // for a completed readiness sample; failed attempts may retain their raw
+    // observation timestamps while leaving the bit clear.
     bool gpuReadyAttempted = false;
     bool gpuReadySignalResultValid = false;
     int64_t gpuReadySignalResult = 0;
