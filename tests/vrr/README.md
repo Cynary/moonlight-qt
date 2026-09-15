@@ -2,21 +2,22 @@
 
 The interval-quality queue is now the production VRR policy (responsive
 revision 7). There is no queue-policy A/B checkbox; saved `v2queue` values are ignored and
-removed when settings are saved. Every normal session uses the same 0.5 ms
-tolerance and severity-weighted thirty-second score, with targets of
-99% / 99.5% / 99.95% for Lowest latency / Balanced / Smoothest. Their clean
-holds are 6 / 8 / 10 seconds and release speeds are 125 / 100 / 100 us per
-second. Growth requires both below-target quality and fresh readiness-related
-interval error. See architecture.md for the complete measurement and bounds.
+removed when settings are saved. Every normal session uses 0.5 ms tolerance for
+Low Latency and Balanced Target and 0.2 ms for Smooth, with severity-weighted
+preset histories and targets of
+99% / 99.5% / 99.99% for Low Latency / Balanced Target / Smooth. Their clean
+holds are 6 / 8 / 10 seconds and release speeds are 125 / 100 / 50 us per
+second. Their score histories are 1 / 2 / 5 minutes respectively. Growth
+requires both below-target quality and fresh readiness-related interval error.
+See architecture.md for the complete measurement and bounds.
 
 Historical policy implementations remain available through explicit captured
 controller parameters; session configuration no longer selects a queue-policy A/B arm.
 Both ordinary and warm fixture exports inherit the current production policy.
-Existing historical arithmetic and trace tests remain, but revision-6/7/8 replay
-support and final validation are still deferred at the user's request. The
-deployed replay utility rejects those captured revisions; do not claim an exact
-baseline or a gameplay improvement from this promotion. No tests or simulations
-were run for it. The trace queue concurrency test covers 60,000 rows from three
+Existing historical arithmetic and trace tests remain, and the revision-6/7/8
+replay support is covered by the deterministic suites below. A passing local
+replay test is not a gameplay or optical-smoothness claim. The trace queue
+concurrency test covers 60,000 rows from three
 producers plus bounded-full/empty behavior.
 
 Linux Vulkan on Wayland now attaches presentation-time feedback to each native
@@ -127,8 +128,11 @@ software spacing floor, while Immediate and FIFO retain that floor. The
 Gamescope WSI FIFO compatibility path retains its compositor-owned behavior,
 while disabling Allow tearing selects supported Mailbox at session startup.
 The latency presets cap adaptive padding independently of native mode: half a
-configured stream frame for Lowest latency, one frame for Balanced, and two frames
-for Smoothest. Stale-work replacement remains a separate two-frame rule.
+fitted source frame for Low Latency, one frame for Balanced Target, and three
+frames for Smooth in live sessions. Explicit historical replay parameters can
+retain the configured stream-rate basis. Smooth is additionally allowed up to
+24 ms, subject to queue capacity. Stale-work replacement remains a separate
+two-frame rule.
 
 The Allow tearing checkbox defaults on and requires reconnect. The worker tests
 verify identical controller parameters in both arms, an unchanged initial latch
@@ -145,32 +149,43 @@ The FPS picker offers native VRR rates and preserves saved custom values; the
 reduced-rate Low Latency VRR recommendation has been removed. The worker no
 longer generates gap-fill repeats when new frames are unavailable.
 
-Production caps playout padding at 16 ms. Reduce judder optionally smooths
+Low Latency and Balanced Target cap playout padding at 16 ms; Smooth caps it at
+24 ms. Reduce judder optionally smooths
 credible source cadence; transitions follow raw RTP slots. Historical policies remain replayable.
 For controller accuracy, use `simulation.sender_cadence.spacing_accuracy_percent`
 and `spacing_errors_over_2ms`: both long and short spacing errors count. The
 existing sender/arrival stall exclusions and denominator are unchanged. Raw
 presented jerk also includes game-driven cadence changes and is reported
-separately; it is not the controller's 99.95% acceptance criterion.
+separately; it is not the interval-quality preset target.
 `configs/game-spacing-validation.json` gates the nominal production scenario
-at 99.95%, 16 ms maximum padding, p99 decode-to-submission <= 30 ms and zero
+at 99.95% spacing accuracy, the preset padding caps, p99 decode-to-submission <= 30 ms and zero
 modeled interval violations. Its injected fault scenarios gate latency and
 interval safety separately; they do not claim 99.95% under post-target faults.
 The all-arrival queue simulator uses the capture's `can_latch_present` capability;
 forcing it off invents software-floor backlog on a latch-capable session.
 
-Production sets `playout_responsive_buffer=4`: Lowest latency targets 99% over
-30 seconds, Balanced 99.5% over 60 seconds, and Smoothest 99.95% over 120 seconds.
+Production sets `playout_responsive_buffer=7`: Low Latency targets 99% over
+1 minute, Balanced Target 99.5% over 2 minutes, and Smooth 99.99% over 5 minutes.
 A shortfall through 1 ms does not grow the buffer. A 1-2 ms shortfall permits
 growth only above 50% prevalence in the live window, while any shortfall over
 2 ms starts the two-second fresh-miss boost. A 500 us margin and 1 ms minimum
 remain. Version-20 five-minute raw-readiness history is diagnostic
 only; cached tails cannot grow or hold the live buffer. Recovery headroom
 speeds gradual release rather than being subtracted from readiness demand.
-Preset limits use the configured stream rate, so 120/19/30 FPS desktop changes
-cannot expand them. Smoothing follows raw source slots during rate transitions
+Preset limits use the fitted source period in live sessions, so 120/19/30 FPS
+desktop changes cannot expand them and a below-nominal source is not clipped to
+the negotiated rate. Smoothing follows raw source slots during rate transitions
 until 200 ms of credible cadence returns; delivery learning continues against
-RTP spacing. Historical traces default the new parameter to zero.
+RTP spacing. Historical traces default the observed-period switch to zero.
+
+Windows D3D11 also enables bounded GPU-readiness adaptation. Completed
+present-ready fence waits are kept in a ten-second p99 window with a 500 us
+margin, slewed by at most 1 ms per sample and released at 250 us/s, capped at
+12 ms and one source period. The resulting lead advances render start only;
+it does not move the presentation target or turn a failed fence into a valid
+sample. `gpu_readiness_lead_us` and `gpu_readiness_applied_us` make the decision
+and measured wait visible in schema-5 traces. `playout_capacity_telemetry=1`
+also records unclamped demand when the cadence cap limits the applied buffer.
 
 Historical production sets `playout_prediction_only=1`: readiness prediction controls both
 growth and release, independently of display feedback. Required protection is
@@ -185,8 +200,8 @@ this policy. They remain optional trace/cadence diagnostics, with absent display
 events reported as unavailable or through separately labeled submission
 estimates. The selected latency preset still limits the allowed padding. The
 historical version-18 profiles isolate that policy from native-hitch estimates;
-current version-20 diagnostics cannot hold the live buffer high. The three-frame queue and 16 ms
-padding cap are unchanged. Missing `playout_prediction_only` defaults to zero;
+current version-20 diagnostics cannot hold the live buffer high. The three-frame queue
+and preset padding caps are unchanged. Missing `playout_prediction_only` defaults to zero;
 the historical native-hitch and combined-feedback policies remain replayable.
 Controller regressions cover growth and later release without display events,
 delivery/render/scheduler faults, startup without double-counted protection,

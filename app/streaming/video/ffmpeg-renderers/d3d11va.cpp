@@ -1224,6 +1224,7 @@ uint64_t D3D11VARenderer::waitForDecode(AVFrame*, uint64_t decodeBoundary)
         eventResult = m_DecodeD2RFence->SetEventOnCompletion(
             decodeBoundary, m_VrrPresentReadyFenceEvent);
     }
+    DWORD lastEventResult = WAIT_TIMEOUT;
     const auto result = D3D11FenceWait::wait(decodeBoundary, LiGetMicroseconds,
         [&] { return m_DecodeD2RFence->GetCompletedValue(); },
         [&](unsigned timeoutMs) {
@@ -1231,8 +1232,8 @@ uint64_t D3D11VARenderer::waitForDecode(AVFrame*, uint64_t decodeBoundary)
                 Sleep(timeoutMs);
                 return true;
             }
-            const auto status = WaitForSingleObject(m_VrrPresentReadyFenceEvent, timeoutMs);
-            return status == WAIT_OBJECT_0 || status == WAIT_TIMEOUT;
+            lastEventResult = WaitForSingleObject(m_VrrPresentReadyFenceEvent, timeoutMs);
+            return lastEventResult == WAIT_OBJECT_0 || lastEventResult == WAIT_TIMEOUT;
         });
     if (result.status != D3D11FenceWait::Status::Complete) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1240,6 +1241,13 @@ uint64_t D3D11VARenderer::waitForDecode(AVFrame*, uint64_t decodeBoundary)
             static_cast<unsigned long long>(decodeBoundary),
             static_cast<unsigned long long>(result.completedValue),
             m_DecodeDevice->GetDeviceRemovedReason());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "D3D11 VRR decode-ready wait detail: stop=%s elapsed_us=%llu wait_calls=%u event_used=%d event_setup=%x event=%lu render_device=%x",
+            D3D11FenceWait::stopReasonName(result.stopReason),
+            static_cast<unsigned long long>(result.elapsedUs), result.waitCalls,
+            useEvent && SUCCEEDED(eventResult), eventResult,
+            static_cast<unsigned long>(lastEventResult),
+            m_RenderDevice->GetDeviceRemovedReason());
         m_VrrPresentReadyAvailable = false;
         m_VrrFallbackReason = VrrFallbackReason::AdaptivePresentationUnavailable;
         queueRenderDeviceReset();
@@ -1258,8 +1266,13 @@ void D3D11VARenderer::renderVideo(AVFrame* frame, uint64_t decodeBoundary)
         if (decodeBoundary != 0) {
             // captureDecodeBoundary() inserted this signal before any later
             // frame could add decoder work. Wait for this frame only.
-            m_RenderDeviceContext->Wait(m_RenderD2RFence.Get(),
-                                        decodeBoundary);
+            const HRESULT hr = m_RenderDeviceContext->Wait(m_RenderD2RFence.Get(),
+                                                           decodeBoundary);
+            if (FAILED(hr)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "D3D11 decode-to-render Wait() failed: %x (target=%llu)",
+                    hr, static_cast<unsigned long long>(decodeBoundary));
+            }
         }
         else {
             // Legacy rendering and a failed boundary capture retain the
@@ -1270,10 +1283,21 @@ void D3D11VARenderer::renderVideo(AVFrame* frame, uint64_t decodeBoundary)
                 acquiredContextLock = true;
             }
             const UINT64 fenceValue = m_D2RFenceValue++;
-            if (SUCCEEDED(m_DecodeDeviceContext->Signal(
-                    m_DecodeD2RFence.Get(), fenceValue))) {
-                m_RenderDeviceContext->Wait(m_RenderD2RFence.Get(),
-                                            fenceValue);
+            const HRESULT signalResult = m_DecodeDeviceContext->Signal(
+                m_DecodeD2RFence.Get(), fenceValue);
+            if (SUCCEEDED(signalResult)) {
+                const HRESULT waitResult = m_RenderDeviceContext->Wait(
+                    m_RenderD2RFence.Get(), fenceValue);
+                if (FAILED(waitResult)) {
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                        "D3D11 decode-to-render Wait() failed: %x (target=%llu)",
+                        waitResult, static_cast<unsigned long long>(fenceValue));
+                }
+            }
+            else {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "D3D11 decode-to-render Signal() failed: %x (target=%llu)",
+                    signalResult, static_cast<unsigned long long>(fenceValue));
             }
             if (acquiredContextLock) {
                 unlockContext(this);
@@ -1333,18 +1357,30 @@ void D3D11VARenderer::renderVideo(AVFrame* frame, uint64_t decodeBoundary)
         // we insert a wait for the previous frame's fence value rather than the current one.
         // This means the fence should generally not cause a pipeline bubble for the decoder
         // unless rendering is taking much longer than expected.
-        if (SUCCEEDED(m_RenderDeviceContext->Signal(m_RenderR2DFence.Get(), m_R2DFenceValue))) {
+        const HRESULT signalResult = m_RenderDeviceContext->Signal(m_RenderR2DFence.Get(), m_R2DFenceValue);
+        if (SUCCEEDED(signalResult)) {
             bool acquiredContextLock = false;
             if (!m_VrrContextLocked) {
                 lockContext(this);
                 acquiredContextLock = true;
             }
             SDL_assert(m_R2DFenceValue > 0);
-            m_DecodeDeviceContext->Wait(m_DecodeR2DFence.Get(), m_R2DFenceValue - 1);
+            const HRESULT waitResult = m_DecodeDeviceContext->Wait(
+                m_DecodeR2DFence.Get(), m_R2DFenceValue - 1);
+            if (FAILED(waitResult)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "D3D11 render-to-decode Wait() failed: %x (target=%llu)",
+                    waitResult, static_cast<unsigned long long>(m_R2DFenceValue - 1));
+            }
             if (acquiredContextLock) {
                 unlockContext(this);
             }
             m_R2DFenceValue++;
+        }
+        else {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "D3D11 render-to-decode Signal() failed: %x (target=%llu)",
+                signalResult, static_cast<unsigned long long>(m_R2DFenceValue));
         }
     }
 }
@@ -2272,7 +2308,7 @@ bool D3D11VARenderer::initializeVrrPresentReadyFence()
     return true;
 }
 
-bool D3D11VARenderer::waitForVrrPresentReady()
+bool D3D11VARenderer::waitForVrrPresentReady(uint64_t decodeBoundary)
 {
     m_VrrGpuReadyAttempted = false;
     m_VrrGpuReadySignalResultValid = false;
@@ -2385,6 +2421,7 @@ bool D3D11VARenderer::waitForVrrPresentReady()
     }
 
     if (waitResult != WAIT_OBJECT_0) {
+        const uint64_t lockReacquireUs = LiGetMicroseconds() - m_VrrGpuReadyTimeUs;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "D3D11 VRR present-ready fence wait failed or timed out: %lu (target=%llu completed=%llu event=%lu device=%x)",
                      static_cast<unsigned long>(waitResult),
@@ -2392,6 +2429,29 @@ bool D3D11VARenderer::waitForVrrPresentReady()
                      static_cast<unsigned long long>(fenceWait.completedValue),
                      static_cast<unsigned long>(lastEventResult),
                      m_RenderDevice->GetDeviceRemovedReason());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "D3D11 VRR present-ready wait detail: stop=%s elapsed_us=%llu wait_calls=%u signal_us=%llu flush_us=%llu event_setup_us=%llu lock_reacquire_us=%llu decode_device=%x separate=%d bind=%d frame_decode_target=%llu",
+            D3D11FenceWait::stopReasonName(fenceWait.stopReason),
+            static_cast<unsigned long long>(fenceWait.elapsedUs), fenceWait.waitCalls,
+            static_cast<unsigned long long>(m_VrrGpuReadySignalEndUs - m_VrrGpuReadySignalStartUs),
+            static_cast<unsigned long long>(m_VrrGpuReadyFlushEndUs - m_VrrGpuReadyFlushStartUs),
+            static_cast<unsigned long long>(m_VrrGpuReadySetEventEndUs - m_VrrGpuReadySetEventStartUs),
+            static_cast<unsigned long long>(lockReacquireUs),
+            m_DecodeDevice->GetDeviceRemovedReason(), m_DecodeDevice != m_RenderDevice,
+            m_BindDecoderOutputTextures, static_cast<unsigned long long>(decodeBoundary));
+        if (m_DecodeDevice != m_RenderDevice) {
+            // Failure-only snapshots, observed after reacquiring the context lock.
+            // These are not simultaneous GPU observations. A newer decode signal
+            // may already be queued; next_signal is not this frame's dependency.
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                "D3D11 VRR fence snapshot: d2r_decode=%llu d2r_render=%llu d2r_next_signal=%llu r2d_render=%llu r2d_decode=%llu r2d_next_signal=%llu",
+                static_cast<unsigned long long>(m_DecodeD2RFence->GetCompletedValue()),
+                static_cast<unsigned long long>(m_RenderD2RFence->GetCompletedValue()),
+                static_cast<unsigned long long>(m_D2RFenceValue),
+                static_cast<unsigned long long>(m_RenderR2DFence->GetCompletedValue()),
+                static_cast<unsigned long long>(m_DecodeR2DFence->GetCompletedValue()),
+                static_cast<unsigned long long>(m_R2DFenceValue));
+        }
         m_VrrPresentReadyAvailable = false;
         return false;
     }
@@ -2475,7 +2535,7 @@ VrrPrepareResult D3D11VARenderer::prepareFrame(AVFrame* frame,
         return result;
     }
 
-    if (!waitForVrrPresentReady()) {
+    if (!waitForVrrPresentReady(decodeBoundary)) {
         m_VrrFallbackReason = VrrFallbackReason::AdaptivePresentationUnavailable;
         populateVrrGpuReadyFeedback(result.feedback);
         result.feedback.cancelled = true;
@@ -2507,6 +2567,9 @@ VrrPrepareResult D3D11VARenderer::prepareFrame(AVFrame* frame,
 
     m_VrrFramePrepared = true;
     result.prepared = true;
+    // The successful path carries the same fence bracket as failure paths so
+    // the pacer can learn a bounded GPU-readiness head start from real waits.
+    populateVrrGpuReadyFeedback(result.feedback);
     // waitForVrrPresentReady() proves that rendering has finished reading the
     // decoder surface. Present() consumes only the prepared back buffer, so
     // let the worker recycle the source AVFrame before its target wait.

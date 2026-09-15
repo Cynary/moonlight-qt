@@ -377,8 +377,8 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps,
                                     "VRR pacing: target %d Hz with %d FPS stream (adaptive timestamp playout, frame timing %s, timing profile %s)",
                                     m_DisplayFps, m_MaxVideoFps,
                                     config.smoothFrameTiming ? "smoothed" : "follows host timestamps",
-                                    config.latencyMode == 2 ? "lowest latency" :
-                                    config.latencyMode == 1 ? "balanced" : "smoothest");
+                                    config.latencyMode == 2 ? "low latency" :
+                                    config.latencyMode == 1 ? "balanced target" : "smooth");
                         return true;
                     }
 

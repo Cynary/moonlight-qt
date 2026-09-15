@@ -885,16 +885,16 @@ Flickable {
                         model: ListModel {
                             id: vrrLatencyModeListModel
                             ListElement {
-                                text: qsTr("Lowest latency")
-                                val: StreamingPreferences.VLM_LOWEST_LATENCY
+                                text: qsTr("Low Latency")
+                                val: StreamingPreferences.VLM_LOW_LATENCY
                             }
                             ListElement {
-                                text: qsTr("Balanced")
-                                val: StreamingPreferences.VLM_BALANCED
+                                text: qsTr("Balanced Target")
+                                val: StreamingPreferences.VLM_BALANCED_TARGET
                             }
                             ListElement {
-                                text: qsTr("Smoothest")
-                                val: StreamingPreferences.VLM_SMOOTHEST
+                                text: qsTr("Smooth")
+                                val: StreamingPreferences.VLM_SMOOTH
                             }
                         }
                         currentIndex: {
@@ -917,11 +917,11 @@ Flickable {
                     Label {
                         width: parent.width
                         wrapMode: Text.Wrap
-                        text: StreamingPreferences.vrrLatencyMode === StreamingPreferences.VLM_LOWEST_LATENCY ?
+                        text: StreamingPreferences.vrrLatencyMode === StreamingPreferences.VLM_LOW_LATENCY ?
                                   qsTr("Minimizes added delay. Uneven delivery can cause more stutter or skipped frames.") :
-                              StreamingPreferences.vrrLatencyMode === StreamingPreferences.VLM_SMOOTHEST ?
-                                  qsTr("Buffers more delivery variation for steadier motion, with more input delay.") :
-                                  qsTr("Keeps a small timing reserve for responsive controls and steadier motion.")
+                              StreamingPreferences.vrrLatencyMode === StreamingPreferences.VLM_SMOOTH ?
+                                  qsTr("Uses more padding and holds it longer for steadier motion, with more input delay.") :
+                                  qsTr("Targets steadier motion with a moderate timing reserve and balanced input delay.")
                     }
 
                     Label {

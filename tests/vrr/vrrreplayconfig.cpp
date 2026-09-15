@@ -359,8 +359,11 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
             value.playoutRequireDisplayEvents > 1 ||
             value.playoutNativeHitchAdaptation > 1 || value.playoutReadinessDrivenAdaptation > 1 ||
             value.playoutStableSmoothnessReference > 1 ||
-            value.renderStartPreserveLearnedLead > 1) {
-        return fail("prediction-only, display event requirement, native hitch adaptation, readiness adaptation, stable smoothness reference, and learned preparation lead flags must be 0 or 1");
+            value.renderStartPreserveLearnedLead > 1 ||
+            value.playoutDelayCapUsesObservedPeriod > 1 ||
+            value.playoutCapacityTelemetry > 1 ||
+            value.playoutGpuReadinessAdaptation > 1) {
+        return fail("prediction-only, display event requirement, native hitch adaptation, readiness adaptation, stable smoothness reference, learned preparation lead, observed-period cap, capacity telemetry, and GPU readiness flags must be 0 or 1");
     }
     if (value.baseGuardDivisor == 0 ||
             value.pacingLatencyExtraPeriodDenominator == 0 ||
@@ -425,6 +428,11 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
     if (value.playoutDelayCapSourcePeriodPerMille > 4000) {
         return fail("playout_delay_cap_source_period_per_mille must be in 0..4000");
     }
+    if (value.playoutGpuReadinessWindowUs == 0 ||
+            value.playoutGpuReadinessMaximumUs == 0 ||
+            value.playoutGpuReadinessPercentile > 100) {
+        return fail("GPU readiness window and ceiling must be non-zero and its percentile must be in 0..100");
+    }
     if (value.latencyFixAllRates && !value.latencyFixEnabled) {
         return fail("latency_fix_all_rates requires latency_fix_enabled");
     }
@@ -462,9 +470,9 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
     }
     if (value.playoutOnTimeTargetPerMillion < 900000 || value.playoutOnTimeTargetPerMillion > 1000000)
         return fail("playout_on_time_target_per_million must be in 900000..1000000");
-    if (value.playoutReadinessWindowUs < 3000000 || value.playoutReadinessWindowUs > 120000000 ||
+    if (value.playoutReadinessWindowUs < 3000000 || value.playoutReadinessWindowUs > 300000000 ||
             value.playoutReadinessWindowUs % 100000 != 0)
-        return fail("playout_readiness_window_us must be a multiple of 100000 in 3000000..120000000");
+        return fail("playout_readiness_window_us must be a multiple of 100000 in 3000000..300000000");
     if (value.playoutReadinessHitchThresholdUs &&
             (!value.playoutPredictionOnly || value.playoutReadinessHitchThresholdUs > 10000)) {
         return fail("playout_readiness_hitch_threshold_us requires prediction-only playout and must be in 1..10000");

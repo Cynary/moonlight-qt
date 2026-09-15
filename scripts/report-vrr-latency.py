@@ -20,7 +20,7 @@ import tempfile
 import zlib
 
 
-MODES = {0: "Smoothest", 1: "Balanced", 2: "Lowest latency"}
+MODES = {0: "Smooth", 1: "Balanced Target", 2: "Low Latency"}
 SESSION_FIELDS = ("session_latency_mode", "session_readiness_hitch_feedback",
                   "session_latency_oscillation", "latency_test_phase",
                   "calibration_loaded", "initial_cached_samples", "history_version",

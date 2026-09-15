@@ -42,6 +42,10 @@ int main()
             "missing event notifications must not hide completed GPU work or admit incomplete work");
         check(now == std::min<uint64_t>(readyAt, 50000),
             "completion polling must recover promptly and retain the 50 ms total timeout");
+        check(result.elapsedUs == now && result.waitCalls == now / 1000 &&
+              result.stopReason == (readyAt <= 50000 ? D3D11FenceWait::StopReason::Completed :
+                  D3D11FenceWait::StopReason::Deadline),
+              "wait diagnostics must distinguish elapsed deadline from successful completion");
     }
     {
         uint64_t now = 0;
@@ -62,6 +66,31 @@ int main()
     check(D3D11FenceWait::wait(7, [] { return 0ULL; }, [] { return 6ULL; },
           [](unsigned) { return true; }).status == D3D11FenceWait::Status::Timeout,
           "stale events and a stalled clock must not loop forever");
+    {
+        const auto result = D3D11FenceWait::wait(7, [] { return 0ULL; }, [] { return 6ULL; },
+            [](unsigned) { return true; });
+        check(result.stopReason == D3D11FenceWait::StopReason::IterationLimit &&
+              result.elapsedUs == 0 && result.waitCalls == 100,
+              "an iteration guard must not be diagnosed as a 50 ms GPU stall");
+    }
+    {
+        uint64_t now = 1000;
+        const auto result = D3D11FenceWait::wait(7, [&] { return now; }, [] { return 6ULL; },
+            [&](unsigned) { now = 999; return true; });
+        check(result.status == D3D11FenceWait::Status::Timeout &&
+              result.stopReason == D3D11FenceWait::StopReason::ClockReversed &&
+              result.elapsedUs == 0 && result.waitCalls == 1,
+              "a reversed clock must report its cause without unsigned elapsed-time underflow");
+    }
+    {
+        uint64_t now = 0;
+        const auto result = D3D11FenceWait::wait(7, [&] { return now; }, [] { return 6ULL; },
+            [&](unsigned) { now += 100; return false; });
+        check(result.status == D3D11FenceWait::Status::WaitFailed &&
+              result.stopReason == D3D11FenceWait::StopReason::NativeWaitFailed &&
+              result.elapsedUs == 100 && result.waitCalls == 1,
+              "native wait failure diagnostics must count the failing call and its elapsed time");
+    }
     const auto submit = [&](DxgiPresentParameters parameters,
                             unsigned int interval, unsigned int flags) {
         const auto previousCalls = swapChain.calls;

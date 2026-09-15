@@ -525,7 +525,7 @@ void testLatencyPresetsQueuedRecovery()
         for (int mode : {0, 1, 2}) {
             // A single interval is normal worker occupancy for every preset.
             runLatencyFixQueuedRecovery(rate, false, true, 1500, false, mode);
-            // Even Lowest latency must keep the only available image.
+            // Even Low Latency must keep the only available image.
             runLatencyFixQueuedRecovery(rate, false, false, 1500, false, mode);
         }
     }

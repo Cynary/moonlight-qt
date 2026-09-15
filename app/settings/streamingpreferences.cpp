@@ -145,13 +145,13 @@ void StreamingPreferences::reload()
     if (settings.contains(SER_VRRLATENCYMODE)) {
         bool validMode = false;
         const int savedMode = settings.value(SER_VRRLATENCYMODE).toInt(&validMode);
-        if (validMode && savedMode >= VLM_SMOOTHEST && savedMode <= VLM_LOWEST_LATENCY) {
+        if (validMode && savedMode >= VLM_SMOOTH && savedMode <= VLM_LOW_LATENCY) {
             vrrLatencyMode = savedMode;
         }
     }
     else if (settings.contains(SER_VRRLATENCYFIX)) {
-        // Preserve the old checkbox choice while new users start on Balanced.
-        vrrLatencyMode = settings.value(SER_VRRLATENCYFIX).toBool() ? VLM_BALANCED : VLM_SMOOTHEST;
+        // Preserve the old checkbox choice while new users start on Balanced Target.
+        vrrLatencyMode = settings.value(SER_VRRLATENCYFIX).toBool() ? VLM_BALANCED_TARGET : VLM_SMOOTH;
     }
     smoothVrrFrameTiming = settings.value(SER_SMOOTHVRRFRAMETIMING, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();

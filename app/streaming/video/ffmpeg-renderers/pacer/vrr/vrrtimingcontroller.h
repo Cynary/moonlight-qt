@@ -25,6 +25,15 @@
     X(uint64_t, latency_fix_all_rates, latencyFixAllRates, 0) \
     X(uint64_t, latency_fix_delay_period_per_mille, latencyFixDelayPeriodPerMille, 500) \
     X(uint64_t, playout_delay_cap_source_period_per_mille, playoutDelayCapSourcePeriodPerMille, 0) \
+    X(uint64_t, playout_delay_cap_uses_observed_period, playoutDelayCapUsesObservedPeriod, 0) \
+    X(uint64_t, playout_capacity_telemetry, playoutCapacityTelemetry, 0) \
+    X(uint64_t, playout_gpu_readiness_adaptation, playoutGpuReadinessAdaptation, 0) \
+    X(uint64_t, playout_gpu_readiness_window_us, playoutGpuReadinessWindowUs, 10000000) \
+    X(unsigned int, playout_gpu_readiness_percentile, playoutGpuReadinessPercentile, 99) \
+    X(uint64_t, playout_gpu_readiness_margin_us, playoutGpuReadinessMarginUs, 500) \
+    X(uint64_t, playout_gpu_readiness_attack_us, playoutGpuReadinessAttackUs, 1000) \
+    X(uint64_t, playout_gpu_readiness_release_us_per_second, playoutGpuReadinessReleaseUsPerSecond, 250) \
+    X(uint64_t, playout_gpu_readiness_maximum_us, playoutGpuReadinessMaximumUs, 12000) \
     X(uint64_t, playout_prediction_only, playoutPredictionOnly, 0) \
     X(uint64_t, playout_responsive_buffer, playoutResponsiveBuffer, 0) \
     X(uint64_t, playout_mean_miss_hold_us, playoutMeanMissHoldUs, 4000000) \
@@ -177,6 +186,7 @@ struct VrrTimingDiagnostics {
     uint64_t appliedReadinessReserveUs = 0;
     uint64_t renderBaselineUs = 0;
     uint64_t renderInsuranceUs = 0;
+    uint64_t gpuReadinessLeadUs = 0;
     uint64_t pacingLatencyBudgetUs = 0;
     size_t cadenceSamples = 0;
     size_t rateCandidateSamples = 0;
@@ -237,6 +247,9 @@ struct VrrTimingDecision {
     uint64_t timingBudgetUs = 0;
     uint64_t renderLeadUs = 0;
     uint64_t renderWakeLeadUs = 0;
+    // Preparation begins this much earlier than the non-GPU render budget
+    // requires. It is a learned, bounded head start and never moves targetUs.
+    uint64_t gpuReadinessLeadUs = 0;
     uint64_t targetWakeLeadUs = 0;
 
     bool latchedPresentation = false;
@@ -267,7 +280,12 @@ public:
     // never moves after rendering has begun.
     void notePreparationDuration(uint64_t preparationDurationUs,
                                  uint64_t acquisitionWaitUs = 0,
-                                 uint64_t preparationCompleteUs = 0);
+                                 uint64_t preparationCompleteUs = 0,
+                                 uint64_t gpuReadyWaitUs = 0);
+    // Successful renderer fence waits are feedback for future preparation
+    // starts. Failed/unknown waits are deliberately not learned.
+    void noteGpuReadyWait(uint64_t waitUs, bool completed,
+                          uint64_t completionUs = 0);
     void noteSchedulerDelays(uint64_t renderDelayUs,
                              uint64_t targetDelayUs,
                              bool targetDelayValid);
@@ -298,6 +316,7 @@ public:
     uint64_t displayPeriodUs() const;
     uint64_t guardUs() const;
     uint64_t renderLeadUs() const;
+    uint64_t gpuReadinessLeadUs() const;
     uint64_t targetWakeLeadUs() const;
     uint64_t earliestSubmissionUs() const;
     uint64_t lastSubmissionUs() const;
@@ -325,6 +344,7 @@ private:
     void updateLatencyFixState();
     uint64_t latencyFixDelayLimitUs() const;
     uint64_t playoutDelayCapUs() const;
+    uint64_t gpuReadinessCeilingUs() const;
     bool m_LatencyFixActive = false;
     Vrr13::RecentReadiness m_RecentReadiness;
     uint64_t m_CadenceStableSinceUs = 0;
@@ -485,6 +505,13 @@ private:
     uint64_t m_RenderLeadUs = 0;
     uint64_t m_RenderWakeLeadUs = 0;
     uint64_t m_TargetWakeLeadUs = 0;
+    uint64_t m_GpuReadinessLeadUs = 0;
+    struct GpuReadinessSample {
+        uint64_t completionUs = 0;
+        uint64_t waitUs = 0;
+    };
+    std::deque<GpuReadinessSample> m_GpuReadinessSamples;
+    uint64_t m_LastGpuReadinessUpdateUs = 0;
     bool m_CanLatchPresentation = true;
     bool m_LatchedPresentation = false;
     size_t m_CadenceStabilityLatchFramesRemaining = 0;
@@ -528,6 +555,7 @@ private:
     bool hasRecentNativeFeedback(uint64_t now) const;
     const Vrr13::SmoothnessFeedback& activeSmoothnessFeedback(uint64_t now) const;
     uint64_t m_RequestedPlayoutDelayUs = 0;
+    uint64_t m_UnclampedRequestedPlayoutDelayUs = 0;
     bool m_FeedbackModeValid = false, m_FeedbackLatched = false;
     uint64_t m_LastHistoryArrivalUs = 0;
     unsigned int m_PlayoutBandIndex = 0;

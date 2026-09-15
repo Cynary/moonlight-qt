@@ -73,6 +73,7 @@ VrrTimingParameters legacyFeedbackParameters(const VrrSessionConfig& session)
     policy.playoutDelayMarginUs = 300;
     policy.playoutSmoothingGainPerMille = 0;
     policy.playoutSmoothingMaxLagUs = 6000;
+    policy.playoutDelayMaximumUs = 16000;
     return policy;
 }
 
@@ -3255,6 +3256,56 @@ void testPreparationKeepsLearnedLead()
     expect(sawLargerLead, "longer preparation must earn rendering time, not only a later target");
 }
 
+void testGpuReadinessLeadIsSeparateFromTarget()
+{
+    const auto session = config(60, 120);
+    const auto production = vrrTimingParametersForSession(session);
+    auto noGpuAdaptation = production;
+    noGpuAdaptation.playoutGpuReadinessAdaptation = 0;
+    VrrTimingController adapted(session, true, production);
+    VrrTimingController baseline(session, true, noGpuAdaptation);
+
+    // Feed the same completed GPU wait to the adapted controller and the
+    // equivalent non-GPU preparation cost to the baseline. The learned term
+    // must buy render-start time without moving the source presentation slot.
+    for (int i = 0; i < 80; ++i) {
+        const uint32_t rtp = static_cast<uint32_t>(i * 1500);
+        const uint64_t decoded = decodedTimeForRtp(1000000, rtp);
+        const auto a = adapted.schedule(frame(i, rtp, true, decoded), decoded);
+        const auto b = baseline.schedule(frame(i, rtp, true, decoded), decoded);
+        expect(a.targetUs == b.targetUs,
+               "GPU readiness adaptation must not move the presentation target");
+        adapted.notePreparationDuration(7000, 0, decoded + 7000, 6000);
+        baseline.notePreparationDuration(1000, 0, decoded + 1000, 0);
+        adapted.noteGpuReadyWait(6000, true, decoded + 7000);
+        adapted.noteSubmission(true, false, a.targetUs);
+        baseline.noteSubmission(true, false, b.targetUs);
+    }
+
+    const uint32_t rtp = 80U * 1500U;
+    const uint64_t decoded = decodedTimeForRtp(1000000, rtp);
+    const auto adaptedDecision = adapted.schedule(
+        frame(80, rtp, true, decoded), decoded);
+    const auto baselineDecision = baseline.schedule(
+        frame(80, rtp, true, decoded), decoded);
+    expect(adaptedDecision.gpuReadinessLeadUs > 0,
+           "completed GPU waits must earn a readiness lead");
+    expect(adaptedDecision.gpuReadinessLeadUs <=
+               std::min<uint64_t>(production.playoutGpuReadinessMaximumUs,
+                                  adaptedDecision.sourcePeriodUs),
+           "GPU readiness lead must remain within its source-period ceiling");
+    expect(adaptedDecision.targetUs == baselineDecision.targetUs,
+           "learned GPU readiness must leave the source target unchanged");
+    expect(adaptedDecision.renderStartUs < baselineDecision.renderStartUs,
+           "learned GPU readiness must advance the render-start deadline");
+
+    VrrTimingController failed(session, true, production);
+    failed.schedule(frame(0, 0, true, 1000000), 1000000);
+    failed.noteGpuReadyWait(12000, false, 1007000);
+    expect(failed.gpuReadinessLeadUs() == 0,
+           "failed GPU waits must not train readiness head start");
+}
+
 void testReadinessDrivenPadding()
 {
     // Identical FIFO and three-frame capacity throughout. Only time padding
@@ -3566,7 +3617,8 @@ void testReadinessHitchBufferAdaptation()
         if (i == 599) clean = d.playoutDelayUs;
         if (i >= 600) peak = std::max(peak, d.playoutDelayUs);
         finalDelay = d.playoutDelayUs;
-        expect(d.playoutDelayUs <= 16000, "attributed growth must retain the hard cap");
+        expect(d.playoutDelayUs <= policy.playoutDelayMaximumUs,
+               "attributed growth must retain the hard cap");
     }
     expect(peak > clean, "observed readiness-caused output misses must earn additional buffering");
     expect(finalDelay < peak, "expired event demands must release increased buffering");
@@ -3621,12 +3673,13 @@ void testPredictionOnlyBufferAdaptation()
         expect(finalDelay == 3000,
                "expired readiness tails must release the increased buffer while retaining 3 ms headroom");
         expect(bounded && maximumLatency <= 30000,
-               "prediction adaptation must preserve bounded attack, the 16 ms cap, spacing and latency");
+               "prediction adaptation must preserve bounded attack, the Smooth cap, spacing and latency");
         expect(controller.nativeCadenceIntervals() == 0,
                "bidirectional predictive adaptation must work with no display-event coverage");
     }
 
-    // Low-rate desktop delivery must not expand protection past 16 ms.
+    // Low-rate desktop delivery must not expand protection past the selected
+    // profile's absolute cap.
     for (int fps : {20, 30, 60}) {
         auto desktopSession = config(fps, 120);
         const auto desktopPolicy = vrrTimingParametersForSession(desktopSession);
@@ -3653,7 +3706,7 @@ void testPredictionOnlyBufferAdaptation()
                     (unsigned long long)historicalMaximum, (unsigned long long)maximumDelay);
         expect(historicalMaximum > 16000,
                "regression workload must reproduce the previous expanding buffer");
-        expect(maximumDelay <= 16000,
+        expect(maximumDelay <= desktopPolicy.playoutDelayMaximumUs,
                "slow source cadence must never expand the absolute buffer ceiling");
     }
 
@@ -3782,10 +3835,10 @@ void testProductionPreservesRelativeGameSpacing()
     auto session = config(120, 120);
     session.smoothFrameTiming = false;
     auto policy = vrrTimingParametersForSession(session);
-    expect(policy.playoutDelayMaximumUs == 16000 &&
+    expect(policy.playoutDelayMaximumUs == 24000 &&
                policy.playoutDelayMaximumPeriodPerMille == 0 &&
-               policy.playoutDelayCapSourcePeriodPerMille == 2000,
-           "production Smoothest must bound its two-source-frame allowance by 16 ms");
+               policy.playoutDelayCapSourcePeriodPerMille == 3000,
+           "production Smooth must allow three source frames up to 24 ms");
     // Hold padding constant to isolate the spacing contract from adaptation.
     policy.playoutDelayMaximumPeriodPerMille = 0;
     policy.playoutDelayCapSourcePeriodPerMille = 0;
@@ -4039,7 +4092,7 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
     expect(VrrSessionConfig{}.latencyMode == 0 &&
                VrrTimingParameters{}.latencyFixAllRates == 0 &&
                VrrTimingParameters{}.playoutDelayCapSourcePeriodPerMille == 0,
-           "historical session and replay defaults must retain Smoothest and the legacy rate band");
+           "historical session and replay defaults must retain Smooth and the legacy rate band");
     struct Rates { int source; int display; };
     for (const auto rates : {Rates{40, 120}, Rates{60, 120}, Rates{100, 120},
                              Rates{120, 120}, Rates{60, 60}, Rates{120, 240}}) {
@@ -4047,8 +4100,9 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
         const auto ordinaryPolicy = vrrTimingParametersForSession(ordinarySession);
         expect(ordinaryPolicy.latencyFixEnabled == 0 &&
                    ordinaryPolicy.latencyFixAllRates == 0 &&
-                   ordinaryPolicy.playoutDelayCapSourcePeriodPerMille == 2000,
-               "Smoothest must cap adaptive buffering at two source frames");
+                   ordinaryPolicy.playoutDelayCapSourcePeriodPerMille == 3000 &&
+                   ordinaryPolicy.playoutDelayMaximumUs == 24000,
+               "Smooth must cap adaptive buffering at three source frames");
         for (int mode : {1, 2}) {
             auto session = ordinarySession;
             session.latencyMode = mode;
@@ -4057,7 +4111,7 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
             expect(policy.latencyFixEnabled == 1 && policy.latencyFixAllRates == 1 &&
                        policy.latencyFixDelayPeriodPerMille == (mode == 1 ? 500 : 0) &&
                        policy.playoutDelayCapSourcePeriodPerMille == capPerMille,
-                   "Balanced and Lowest must resolve to replayable source-frame buffer caps");
+                   "Balanced Target and Low Latency must resolve to replayable source-frame buffer caps");
             for (bool canLatch : {false, true}) {
                 VrrTimingController selected(session, canLatch, policy);
                 VrrTimingController ordinary(ordinarySession, canLatch, ordinaryPolicy);
@@ -4076,16 +4130,16 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
                     const auto b = recorded.schedule(frame(i, rtp, validRtp, decoded),
                         std::max(decoded, recorded.lastSubmissionUs()));
                     const uint64_t ordinaryLimit =
-                        ordinary.sourcePeriodUs() * 2000 / 1000;
+                        ordinary.sourcePeriodUs() * 3000 / 1000;
                     expect(a.targetUs == b.targetUs && a.originalTargetUs == b.originalTargetUs &&
                                a.renderStartUs == b.renderStartUs &&
                                a.playoutDelayUs == b.playoutDelayUs &&
                                a.requestedPlayoutDelayUs == b.requestedPlayoutDelayUs &&
                                a.latchedPresentation == b.latchedPresentation,
-                           "Smoothest and its recorded policy must retain identical decisions through late and invalid-RTP frames");
+                           "Smooth and its recorded policy must retain identical decisions through late and invalid-RTP frames");
                     expect(a.playoutDelayUs <= ordinaryLimit &&
                                ordinary.playoutDelayUs() <= ordinaryLimit,
-                           "Smoothest padding must stay within two fitted source frames");
+                           "Smooth padding must stay within three fitted source frames");
                     const auto now = std::max(decoded, selected.lastSubmissionUs());
                     const auto decision = selected.schedule(frame(i, rtp, validRtp, decoded), now);
                     const uint64_t limit =
@@ -4170,7 +4224,7 @@ void testLatencyPresetsBoundHitchesThroughCadenceChanges()
             }
         }
         expect(ordinaryMaximum <= ordinaryBeforeHitches,
-               "display-only hitches must not grow Smoothest's predictive buffer");
+               "display-only hitches must not grow Smooth's predictive buffer");
         expect(selected.nativeCadenceHitches() > 20,
                "reduced-delay presets must continue reporting the hitches they choose not to buffer");
     }
@@ -4251,6 +4305,7 @@ void testResponsiveBufferRecoveryAndDesktopCadence()
         // Preserve the revision-2 three-second recovery contract. Revision 3
         // has explicit, longer retention tested separately below.
         policy.playoutResponsiveBuffer = 2;
+        policy.playoutDelayMaximumUs = 16000;
         expect(policy.playoutResponsiveBuffer == 2 && policy.playoutDelayMarginUs == 500,
                "live policy must select recent readiness rather than the five-minute tail");
         VrrTimingController controller(session, true, policy);
@@ -4260,8 +4315,8 @@ void testResponsiveBufferRecoveryAndDesktopCadence()
         uint64_t ticks = 0, last = 0, previousDelay = 0, clean = 0, peak = 0, finalDelay = 0;
         uint64_t transitionPeak = 0, recoveryAt = 0, maximumLatency = 0;
         unsigned number = 0;
-        const uint64_t cap = std::min<uint64_t>(16000,
-            (1000000 / 120) * (mode == 0 ? 2000 : mode == 1 ? 1000 : 500) / 1000);
+        const uint64_t configuredCap = std::min<uint64_t>(16000,
+            (1000000 / 120) * (mode == 0 ? 3000 : mode == 1 ? 1000 : 500) / 1000);
         // 12 s clean startup; repeated large desktop transitions, jitter during
         // one transition cycle, then 16 s to prove bounded recovery.
         for (int second = 0; second < 56; ++second) {
@@ -4282,7 +4337,13 @@ void testResponsiveBufferRecoveryAndDesktopCadence()
                 controller.notePreparationDuration(work);
                 controller.noteSchedulerDelays(scheduler, 0, true);
                 controller.noteSubmission(true, false, last);
-                expect(d.playoutDelayUs <= cap, "desktop FPS must not expand the configured-rate cap");
+                const uint64_t cap = std::min<uint64_t>(
+                    16000,
+                    d.sourcePeriodUs *
+                        (mode == 0 ? 3000 : mode == 1 ? 1000 : 500) /
+                        1000);
+                expect(d.playoutDelayUs <= cap,
+                       "buffer must remain within the observed-cadence cap");
                 expect(!number || d.playoutDelayUs <= previousDelay + 500,
                        "buffer attack must remain bounded through rate changes");
                 maximumLatency = std::max(maximumLatency, last - decoded);
@@ -4299,7 +4360,7 @@ void testResponsiveBufferRecoveryAndDesktopCadence()
             (unsigned long long)recoveryAt, (unsigned long long)maximumLatency);
         expect(clean <= 1250 && transitionPeak <= 1500,
                "clean 120/19/30 FPS desktop changes and cached tails must not inflate buffering");
-        expect(peak >= std::min<uint64_t>(cap, 5000),
+        expect(peak >= std::min<uint64_t>(configuredCap, 5000),
                "real delivery jitter during desktop transitions must still earn protection");
         expect(finalDelay <= 1250 && recoveryAt && recoveryAt < 53000000,
                "a recovered burst must drain within 16 seconds, not five minutes");
@@ -4326,8 +4387,8 @@ void testPresetReadinessTargets()
         auto session = config(120, 116);
         session.latencyMode = mode;
         const auto policy = vrrTimingParametersForSession(session);
-        const uint64_t target = mode == 2 ? 990000 : mode == 1 ? 995000 : 999500;
-        const uint64_t window = mode == 2 ? 30000000 : mode == 1 ? 60000000 : 120000000;
+        const uint64_t target = mode == 2 ? 990000 : mode == 1 ? 995000 : 999900;
+        const uint64_t window = mode == 2 ? 60000000 : mode == 1 ? 120000000 : 300000000;
         expect(policy.playoutResponsiveBuffer == 7 &&
                    policy.playoutOnTimeTargetPerMillion == target &&
                    policy.playoutReadinessWindowUs == window,
@@ -4337,13 +4398,31 @@ void testPresetReadinessTargets()
             const uint64_t required = n < 19800 ? 1000 : n < 19900 ? 3000 : n < 19990 ? 6000 : 9000;
             recent.observe(required, 0, 100000, 1000000 + n * 1000);
         }
-        const uint64_t expected = mode == 2 ? 1000 : mode == 1 ? 3000 : 6000;
+        const uint64_t expected = mode == 2 ? 1000 : mode == 1 ? 3000 : 9000;
         expect(recent.demand(21000000) == expected,
-               "nearest-rank percentiles must distinguish 99, 99.5, and 99.95 without rounding to 100");
+           "nearest-rank percentiles must distinguish the preset targets without rounding to 100");
         expect(recent.demand(21000000 + window) == 0,
                "samples older than each preset's history must expire completely");
         expect(!recent.canRelease(21000000 + window),
                "empty history after silence must not authorize release");
+    }
+}
+
+void testPresetIntervalTolerances()
+{
+    for (int mode : {0, 1, 2}) {
+        auto session = config(120, 116);
+        session.latencyMode = mode;
+        VrrTimingController controller(
+            session, true, vrrTimingParametersForSession(session));
+        const auto decision = controller.schedule(
+            frame(1, 0, true, 100000), 100000);
+        controller.notePreparationDuration(1000, 0, 101000);
+        controller.noteSubmission(true, false, decision.targetUs);
+
+        const uint64_t expected = mode == 0 ? 200 : 500;
+        expect(controller.intervalStats().toleranceUs == expected,
+               "Smooth must use 0.2 ms interval tolerance while other presets use 0.5 ms");
     }
 }
 
@@ -4426,7 +4505,7 @@ void testMeanMissBuffer()
         const auto policy = vrrTimingParametersForSession(session);
         expect(policy.playoutResponsiveBuffer == 7 &&
             policy.playoutMeanMissHoldUs == (mode == 2 ? 6000000 : mode == 1 ? 8000000 : 10000000) &&
-            policy.playoutMeanMissReleaseUsPerSecond == (mode == 2 ? 125 : 100),
+            policy.playoutMeanMissReleaseUsPerSecond == (mode == 0 ? 50 : mode == 2 ? 125 : 100),
             "every preset must select the production interval queue and record its release policy");
     }
 }
@@ -4464,9 +4543,31 @@ void testIntervalQualityBuffer()
     }
 }
 
+void testIntervalQualityUsesPresetHistory()
+{
+    Vrr13::IntervalBuffer oneMinute;
+    Vrr13::IntervalBuffer fiveMinutes;
+    for (uint64_t i = 0; i < 7000; ++i) {
+        const uint64_t intended = 1000000 + i * 10000;
+        const uint64_t offset = i == 1 ? 1000 : 0;
+        const auto sample = Vrr13::IntervalBuffer::Sample{
+            i, intended, intended + offset, intended,
+            intended + offset, 1000, true, true};
+        oneMinute.observe(sample, 1000, 24000, 10000000, 50,
+                          true, 999900, 500, 60000000);
+        fiveMinutes.observe(sample, 1000, 24000, 10000000, 50,
+                            true, 999900, 500, 300000000);
+    }
+    expect(oneMinute.stats().averageValid && fiveMinutes.stats().averageValid &&
+               fiveMinutes.stats().evaluatedUs > oneMinute.stats().evaluatedUs,
+           "the active quality score must retain the selected preset history duration");
+}
+
 int main()
 {
     testIntervalQualityBuffer();
+    testIntervalQualityUsesPresetHistory();
+    testPresetIntervalTolerances();
     testMeanMissBuffer();
     testThresholdedReadinessGrowth();
     testPresetReadinessTargets();
@@ -4490,6 +4591,7 @@ int main()
     testReadinessDrivenPadding();
     testStableNativeSmoothnessReference();
     testPreparationKeepsLearnedLead();
+    testGpuReadinessLeadIsSeparateFromTarget();
     testSmoothnessFeedback();
     testRefreshReferencesAreNotDisplayEvents();
     testVrr14Prediction();

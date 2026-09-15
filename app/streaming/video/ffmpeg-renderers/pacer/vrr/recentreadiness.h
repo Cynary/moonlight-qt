@@ -7,9 +7,10 @@
 #include <vector>
 
 namespace Vrr13 {
-// Live readiness protection, independent of the five-minute calibration prior.
+// Live readiness protection, independent of the persisted calibration prior.
 // Time-bounded 100 ms buckets include successful observations. The default
-// retains the historical three-second p99 policy for exact replay.
+// retains the historical three-second p99 policy for exact replay; current
+// presets may use up to five minutes for their quality history.
 // Source timing is removed before observation; smoothing advance is an explicit
 // additional deadline cost rather than an error in the FIFO source model.
 // Revision 4 treats shortfalls through 1 ms as noise, requires over half the
@@ -19,7 +20,7 @@ public:
     explicit RecentReadiness(uint64_t windowUs = 3000000,
                              uint64_t targetPerMillion = 990000,
                              bool thresholdedMissPolicy = false)
-        : m_WindowUs(std::max<uint64_t>(100000, std::min<uint64_t>(120000000, windowUs))),
+        : m_WindowUs(std::max<uint64_t>(100000, std::min<uint64_t>(300000000, windowUs))),
           m_TargetPerMillion(std::max<uint64_t>(1, std::min<uint64_t>(1000000, targetPerMillion))),
           m_Buckets(m_WindowUs / BucketUs),
           m_ThresholdedMissPolicy(thresholdedMissPolicy)

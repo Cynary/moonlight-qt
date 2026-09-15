@@ -72,7 +72,7 @@ private:
     bool prepareFrameForPresent(AVFrame* frame,
                                 uint64_t decodeBoundary = 0);
     bool initializeVrrPresentReadyFence();
-    bool waitForVrrPresentReady();
+    bool waitForVrrPresentReady(uint64_t decodeBoundary);
     HRESULT presentPreparedFrame(const DxgiPresentParameters& parameters);
     UINT legacyPresentFlags() const;
     void initializeVrrPresentationState(SDL_Window* window,

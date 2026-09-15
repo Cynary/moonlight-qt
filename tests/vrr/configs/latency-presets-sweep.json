@@ -4,7 +4,16 @@
     "controller": {
       "latency_fix_enabled": 0,
       "latency_fix_delay_period_per_mille": 500,
-      "playout_delay_cap_source_period_per_mille": 2000,
+      "playout_delay_cap_source_period_per_mille": 3000,
+      "playout_delay_cap_uses_observed_period": 1,
+      "playout_capacity_telemetry": 1,
+      "playout_gpu_readiness_adaptation": 1,
+      "playout_gpu_readiness_window_us": 10000000,
+      "playout_gpu_readiness_percentile": 99,
+      "playout_gpu_readiness_margin_us": 500,
+      "playout_gpu_readiness_attack_us": 1000,
+      "playout_gpu_readiness_release_us_per_second": 250,
+      "playout_gpu_readiness_maximum_us": 12000,
       "playout_require_display_events": 1,
       "playout_submission_estimate_fallback": 1,
       "playout_native_hitch_adaptation": 1,
@@ -133,18 +142,20 @@
   },
   "scenarios": [
     {
-      "name": "smoothest",
+      "name": "smooth",
       "mode": "fixed",
       "parameters": {
         "controller": {
           "latency_fix_enabled": 0,
           "latency_fix_all_rates": 0,
-          "latency_fix_delay_period_per_mille": 500
+          "latency_fix_delay_period_per_mille": 500,
+          "playout_delay_maximum_us": 24000,
+          "playout_delay_cap_source_period_per_mille": 3000
         }
       }
     },
     {
-      "name": "balanced",
+      "name": "balanced-target",
       "mode": "fixed",
       "parameters": {
         "controller": {
@@ -156,7 +167,7 @@
       }
     },
     {
-      "name": "lowest-latency",
+      "name": "low-latency",
       "mode": "fixed",
       "parameters": {
         "controller": {

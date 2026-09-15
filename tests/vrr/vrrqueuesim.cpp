@@ -202,7 +202,7 @@ QJsonObject simulate(const Capture& capture, VrrReplayScenario scenario,
 {
     VrrSessionConfig simulatedSession = capture.session;
     if (!scenario.controllerCustomized) {
-        // Match the UI migration from the enabled legacy checkbox to Balanced
+        // Match the UI migration from the enabled legacy checkbox to Balanced Target
         // when resolving current session policy, leaving explicit snapshots alone.
         if (simulatedSession.latencyFix && simulatedSession.latencyMode == 0) {
             simulatedSession.latencyFix = false;

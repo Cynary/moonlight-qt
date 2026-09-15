@@ -51,7 +51,7 @@ constexpr char kTraceHeader[] =
     "frame_receive_us,frame_reassembled_us,decode_submit_us,pacer_arrival_us,"
     "arrival_queue_depth_before,arrival_queue_depth_after,queue_accepted,dequeue_us,queue_discontinuity,decision_valid,decision_us,"
     "display_refresh_hz,stream_rate_hz,additional_queued_frame,display_period_us,can_latch_present,sender_interval_us,source_rate_hz,source_period_us,"
-    "source_time_us,ready_offset_us,readiness_budget_us,timing_budget_us,render_lead_us,"
+    "source_time_us,ready_offset_us,readiness_budget_us,timing_budget_us,render_lead_us,gpu_readiness_lead_us,"
     "render_wake_lead_us,target_wake_lead_us,guard_us,headroom_us,render_start_us,render_wait_final_us,render_wait_overshoot_us,"
     "render_scheduler_delay_us,render_scheduler_delay_valid,render_deadline_already_elapsed,"
     "render_wait_initial_us,render_wait_active_budget_us,render_wait_coarse_sleep_count,render_wait_coarse_requested_total_us,render_wait_coarse_requested_wake_us,render_wait_coarse_return_us,render_wait_coarse_clock_stalled,render_wait_active_entered,render_wait_active_start_us,render_wait_active_limit_us,render_wait_active_yield_count,render_wait_active_clock_stalled,render_wait_active_yield_limit_reached,"
@@ -78,7 +78,7 @@ constexpr char kTraceHeader[] =
     "native_raster_after_query_result_valid,native_raster_after_query_result,native_raster_after_query_start_us,native_raster_after_query_end_us,native_raster_after_in_vertical_blank,native_raster_after_scanline,"
     "submission_id_query_result_valid,submission_id_query_result,submission_id_query_start_us,submission_id_query_end_us,frame_stats_query_result_valid,frame_stats_query_result,frame_stats_query_start_us,frame_stats_query_end_us,latch_raw_sync_qpc_valid,latch_raw_sync_qpc_ticks,latch_raw_sync_qpc_frequency_hz,"
     "latch_qpc_correlation_valid,latch_qpc_correlation_reference_ticks,latch_qpc_correlation_reference_time_us,latch_qpc_correlation_span_ticks,"
-    "readiness_phase_us,readiness_demand_us,applied_readiness_reserve_us,render_baseline_us,render_insurance_us,pacing_latency_budget_us,cadence_sample_count,rate_candidate_sample_count,readiness_sample_count,preparation_sample_count,render_scheduler_sample_count,target_scheduler_sample_count,clean_spacing_frames,phase_error_frames,readiness_model_valid,playout_delay_us,cadence_smoothing_us,missed_ticks,"
+    "readiness_phase_us,readiness_demand_us,applied_readiness_reserve_us,render_baseline_us,render_insurance_us,gpu_readiness_applied_us,pacing_latency_budget_us,cadence_sample_count,rate_candidate_sample_count,readiness_sample_count,preparation_sample_count,render_scheduler_sample_count,target_scheduler_sample_count,clean_spacing_frames,phase_error_frames,readiness_model_valid,playout_delay_us,cadence_smoothing_us,missed_ticks,"
     "decode_sync_wait_us,prepare_timing_valid,prepare_decode_sync_us,prepare_acquire_us,prepare_render_us,prepare_flush_us,"
     "gap_fills_before,gap_fill_last_us,original_target_us,playout_initial_profile,original_scanout_us,predicted_scanout_us,compositor_lead_us,recovery_headroom_us,smoothness_protection_us,requested_playout_delay_us,submission_smoothness_samples,submission_smoothness_misses,native_smoothness_samples,native_smoothness_misses,playout_capacity_limited,presentation_uncertainty_us"
     VRR_TIMING_PARAMETER_FIELDS(VRR_TRACE_PARAMETER_HEADER)
@@ -558,10 +558,22 @@ int VrrPacingWorker::run()
         telemetry.prepareAcquireUs = preparation.acquireUs;
         telemetry.prepareRenderUs = preparation.renderUs;
         telemetry.prepareFlushUs = preparation.flushUs;
+        const bool gpuReadyCompleted =
+            preparation.feedback.gpuReadyTimingValid &&
+            preparation.feedback.gpuReadyWaitResultValid &&
+            preparation.feedback.gpuReadyWaitResult == 0 &&
+            preparation.feedback.gpuReadyTimeUs >=
+                preparation.feedback.gpuReadyWaitStartUs;
+        const uint64_t gpuReadyWaitUs = gpuReadyCompleted ?
+            preparation.feedback.gpuReadyTimeUs -
+                preparation.feedback.gpuReadyWaitStartUs : 0;
         m_TimingController->notePreparationDuration(
             telemetry.preparationDurationUs,
             preparation.timingValid ? preparation.acquireUs : 0,
-            telemetry.preparationEndUs);
+            telemetry.preparationEndUs, gpuReadyWaitUs);
+        m_TimingController->noteGpuReadyWait(
+            gpuReadyWaitUs, gpuReadyCompleted,
+            preparation.feedback.gpuReadyTimeUs);
 
         midframeWindowStateFlags =
             consumeWindowStateNotifications();
@@ -1296,6 +1308,7 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     addSigned(decision.readinessBudgetUs);
     addUnsigned(decision.timingBudgetUs);
     addUnsigned(decision.renderLeadUs);
+    addUnsigned(decision.gpuReadinessLeadUs);
     addUnsigned(decision.renderWakeLeadUs);
     addUnsigned(decision.targetWakeLeadUs);
     addUnsigned(decision.guardUs);
@@ -1529,6 +1542,10 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     addUnsigned(diagnostics.appliedReadinessReserveUs);
     addUnsigned(diagnostics.renderBaselineUs);
     addUnsigned(diagnostics.renderInsuranceUs);
+    // This field is the completed present-ready wait for this row. The
+    // learned lead used by the next decision is recorded separately as
+    // gpu_readiness_lead_us above.
+    addUnsigned(gpuReadyWaitUs);
     addUnsigned(diagnostics.pacingLatencyBudgetUs);
     addUnsigned(diagnostics.cadenceSamples);
     addUnsigned(diagnostics.rateCandidateSamples);

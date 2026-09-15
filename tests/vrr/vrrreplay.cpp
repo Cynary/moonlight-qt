@@ -477,6 +477,7 @@ struct Columns {
     int readinessBudgetUs = -1;
     int timingBudgetUs = -1;
     int renderLeadUs = -1;
+    int gpuReadinessLeadUs = -1;
     int renderWakeLeadUs = -1;
     int targetWakeLeadUs = -1;
     int guardUs = -1;
@@ -706,6 +707,7 @@ struct Columns {
     int appliedReadinessReserveUs = -1;
     int renderBaselineUs = -1;
     int renderInsuranceUs = -1;
+    int gpuReadinessAppliedUs = -1;
     int pacingLatencyBudgetUs = -1;
     int cadenceSampleCount = -1;
     int rateCandidateSampleCount = -1;
@@ -765,6 +767,7 @@ struct Columns {
         readinessBudgetUs = find("readiness_budget_us");
         timingBudgetUs = find("timing_budget_us");
         renderLeadUs = find("render_lead_us");
+        gpuReadinessLeadUs = find("gpu_readiness_lead_us");
         renderWakeLeadUs = find("render_wake_lead_us");
         targetWakeLeadUs = find("target_wake_lead_us");
         guardUs = find("guard_us");
@@ -1121,6 +1124,7 @@ struct Columns {
         appliedReadinessReserveUs = find("applied_readiness_reserve_us");
         renderBaselineUs = find("render_baseline_us");
         renderInsuranceUs = find("render_insurance_us");
+        gpuReadinessAppliedUs = find("gpu_readiness_applied_us");
         pacingLatencyBudgetUs = find("pacing_latency_budget_us");
         cadenceSampleCount = find("cadence_sample_count");
         rateCandidateSampleCount = find("rate_candidate_sample_count");
@@ -9022,6 +9026,9 @@ int main(int argc, char* argv[])
         const uint64_t gpuReadyWaitUs =
             optionalUnsignedField(
                 fields, columns.gpuReadyWaitUs);
+        const uint64_t gpuReadinessAppliedUs =
+            optionalUnsignedField(
+                fields, columns.gpuReadinessAppliedUs);
         const bool nativeBackendDeclared =
             optionalUnsignedField(
                 fields, columns.nativeBackendValid) != 0;
@@ -11635,7 +11642,7 @@ int main(int argc, char* argv[])
             }
             else if (!scenario.controllerCustomized) {
                 // Current preferences migrate the enabled legacy checkbox to
-                // Balanced; exact/reference replay retains the recorded policy.
+                // Balanced Target; exact/reference replay retains the recorded policy.
                 if (simulatedConfig.latencyFix && simulatedConfig.latencyMode == 0) {
                     simulatedConfig.latencyFix = false;
                     simulatedConfig.latencyMode = 1;
@@ -12163,6 +12170,7 @@ int main(int argc, char* argv[])
                 columns.readinessBudgetUs,
                 columns.timingBudgetUs,
                 columns.renderLeadUs,
+                columns.gpuReadinessLeadUs,
                 columns.renderWakeLeadUs,
                 columns.targetWakeLeadUs,
                 columns.guardUs,
@@ -12381,6 +12389,7 @@ int main(int argc, char* argv[])
                 columns.readinessPhaseUs,
                 columns.readinessDemandUs,
                 columns.appliedReadinessReserveUs,
+                columns.gpuReadinessAppliedUs,
                 columns.cadenceSampleCount,
                 columns.rateCandidateSampleCount,
                 columns.readinessSampleCount,
@@ -13026,6 +13035,12 @@ int main(int argc, char* argv[])
         metrics.referenceRenderLeadDrift.add(absoluteValue(signedDifference(
             referenceDecision.renderLeadUs,
             unsignedField(fields, columns.renderLeadUs))));
+        if (columns.gpuReadinessLeadUs >= 0) {
+            if (referenceDecision.gpuReadinessLeadUs !=
+                    unsignedField(fields, columns.gpuReadinessLeadUs)) {
+                ++metrics.invalidControllerLifecycleRows;
+            }
+        }
         metrics.referenceRenderWakeLeadDrift.add(absoluteValue(
             signedDifference(referenceDecision.renderWakeLeadUs,
                 unsignedField(fields, columns.renderWakeLeadUs))));
@@ -13241,8 +13256,19 @@ int main(int argc, char* argv[])
         if (hasPreparationTelemetry) {
             const uint64_t acquire = optionalUnsignedField(fields, traceHeader.indexOf("prepare_timing_valid")) ?
                 optionalUnsignedField(fields, traceHeader.indexOf("prepare_acquire_us")) : 0;
-            referenceController->notePreparationDuration(preparationUs, acquire, recordedPreparationEndUs);
-            simulatedController->notePreparationDuration(simulatedPreparationUs, acquire, simulatedPreparationEndUs);
+            const bool gpuReadyCompleted = gpuReadyTimingDeclared &&
+                gpuReadyWaitResultDeclared && gpuReadyWaitResult == 0 &&
+                gpuReadyTimeUs >= gpuReadyWaitStartUs;
+            referenceController->notePreparationDuration(
+                preparationUs, acquire, recordedPreparationEndUs,
+                gpuReadyCompleted ? gpuReadyWaitUs : 0);
+            simulatedController->notePreparationDuration(
+                simulatedPreparationUs, acquire, simulatedPreparationEndUs,
+                gpuReadyCompleted ? gpuReadyWaitUs : 0);
+            referenceController->noteGpuReadyWait(
+                gpuReadyWaitUs, gpuReadyCompleted, gpuReadyTimeUs);
+            simulatedController->noteGpuReadyWait(
+                gpuReadyWaitUs, gpuReadyCompleted, simulatedPreparationEndUs);
         }
         const bool spacingHadPriorSubmission =
             referenceController->hasLastSubmission();
@@ -13593,6 +13619,14 @@ int main(int argc, char* argv[])
                                 gpuReadySignalStartUs);
                 }
             }
+        }
+        if (columns.gpuReadinessAppliedUs >= 0 &&
+                gpuReadinessAppliedUs != gpuReadyWaitUs) {
+            // The applied diagnostic is the same completed wait already
+            // derived from the stage timestamps. Keep both fields tied so a
+            // trace cannot claim a different cost than the one used for
+            // readiness adaptation.
+            ++metrics.gpuReadyDurationMismatchRows;
         }
         timelineDetails.recordedGpuReadySignalStartUs =
             gpuReadySignalStartUs;

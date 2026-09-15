@@ -45,12 +45,18 @@ public:
     };
     Q_ENUM(VideoDecoderSelection)
 
-    // Persisted IDs also identify the VRR controller's timing profile.
+    // Persisted IDs also identify the VRR controller's timing profile. Keep
+    // the numeric values stable when changing the user-facing names.
     enum VrrLatencyMode
     {
-        VLM_SMOOTHEST = 0,
-        VLM_BALANCED = 1,
-        VLM_LOWEST_LATENCY = 2
+        VLM_SMOOTH = 0,
+        VLM_BALANCED_TARGET = 1,
+        VLM_LOW_LATENCY = 2,
+
+        // Source compatibility for code using the former profile names.
+        VLM_SMOOTHEST = VLM_SMOOTH,
+        VLM_BALANCED = VLM_BALANCED_TARGET,
+        VLM_LOWEST_LATENCY = VLM_LOW_LATENCY
     };
     Q_ENUM(VrrLatencyMode)
 

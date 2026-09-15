@@ -1,5 +1,5 @@
 @echo off
-rem Production VRR queue: revision 7, with 0.5 ms tolerance and severity-weighted 99/99.5/99.95 percent preset targets. Reconnect after changing the latency preset.
+rem Production VRR queue: revision 7, with 0.5 ms Low Latency/Balanced Target tolerance, 0.2 ms Smooth tolerance, and severity-weighted 99/99.5/99.99 percent preset targets. Reconnect after changing the latency preset.
 setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%SystemRoot%"
 set "PORTABLE=\\allytwo\ChaseShare\MoonlightPortable-x64-6.1.0-vrr-lite"

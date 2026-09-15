@@ -28,8 +28,8 @@ struct VrrSessionConfig {
     bool readinessHitchFeedback = false;
     // Historical near-ceiling checkbox, retained for old tests and captures.
     bool latencyFix = false;
-    // 0: Smoothest, 1: Balanced, 2: Lowest latency, across all VRR rates.
-    // Zero preserves the historical default for replay and explicit test configs.
+    // 0: Smooth, 1: Balanced Target, 2: Low Latency, across all VRR rates.
+    // The IDs are persisted and therefore remain stable across label changes.
     int latencyMode = 0;
     // Session-native A/B choice, recorded separately from controller timing.
     bool allowTearing = true;

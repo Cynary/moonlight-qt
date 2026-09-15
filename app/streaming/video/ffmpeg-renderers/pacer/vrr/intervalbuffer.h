@@ -3,13 +3,18 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace Vrr13 {
 // One definition for buffering and reporting: mean absolute client-added
-// interval error, including zero-error intervals, over the last second.
+// interval error, including zero-error intervals, over the last second. The
+// caller selects the profile tolerance; the quality score retains the
+// preset's longer history independently of that one-second detection average.
 class IntervalBuffer {
 public:
     static constexpr uint64_t ToleranceUs = 500;
+    static constexpr uint64_t ScoreBucketUs = 100000;
+    static constexpr size_t MaximumScoreBuckets = 3000; // five minutes
     struct Sample {
         uint64_t frame = 0, intended = 0, submitted = 0, deadline = 0, ready = 0, buffer = 0;
         bool valid = false, absorbable = false;
@@ -18,6 +23,7 @@ public:
         double averageErrorUs = 0;
         uint64_t evaluatedUs = 0, failedUs = 0;
         double weightedLossUs = 0;
+        uint64_t toleranceUs = ToleranceUs;
         bool severityWeighted = false;
         bool averageValid = false;
         double lossFraction() const {
@@ -30,7 +36,9 @@ public:
     void observe(const Sample& s, uint64_t minimum, uint64_t maximum,
                  uint64_t hold, uint64_t releaseRate,
                  bool severityWeighted = false, uint64_t targetPerMillion = 990000,
-                 uint64_t toleranceUs = 500) {
+        uint64_t toleranceUs = 500,
+                 uint64_t scoreWindowUs = 30000000) {
+        m_Stats.toleranceUs = toleranceUs;
         m_Stats.severityWeighted = severityWeighted;
         minimum = std::min(minimum, maximum);
         if (!m_Initialized) { m_Target = s.buffer; m_Initialized = true; }
@@ -42,7 +50,7 @@ public:
         if (!adjacent) breakSequence();
         m_Previous = s;
         m_HavePrevious = s.valid && s.submitted && s.intended;
-        updateScore(s.submitted);
+        updateScore(s.submitted, scoreWindowUs);
         if (!adjacent) return;
 
         const auto actual = s.submitted - previous.submitted;
@@ -72,11 +80,11 @@ public:
         if (pressure) score.failed += actual;
         // Revision 7 measures severity rather than treating a tiny crossing as
         // a completely failed interval. Keep sub-microsecond loss in double so
-        // Smoothest's 99.95% target is not biased by per-frame rounding.
+        // Smooth's 99.99% target is not biased by per-frame rounding.
         const double excessUs = std::max(0.0, m_Stats.averageErrorUs - toleranceUs);
         const double loss = std::min(1.0, excessUs / intended);
         if (severityWeighted) score.weightedLoss += actual * loss;
-        updateScore(s.submitted);
+        updateScore(s.submitted, scoreWindowUs);
 
         const double allowedLoss = (1000000 - std::min<uint64_t>(targetPerMillion, 1000000)) / 1000000.0;
         const bool belowTarget = m_Stats.lossFraction() > allowedLoss;
@@ -126,18 +134,24 @@ private:
         uint64_t tick = 0, evaluated = 0, failed = 0;
         double weightedLoss = 0;
     };
-    void updateScore(uint64_t at) {
+    void updateScore(uint64_t at, uint64_t windowUs) {
         m_Stats.evaluatedUs = m_Stats.failedUs = 0;
         m_Stats.weightedLossUs = 0;
+        const uint64_t windowBuckets = std::clamp<uint64_t>(
+            (windowUs + ScoreBucketUs - 1) / ScoreBucketUs,
+            1, MaximumScoreBuckets);
+        const uint64_t tick = at / ScoreBucketUs;
         for (const auto& b : m_Score) {
-            if (at / 100000 >= b.tick && at / 100000 - b.tick < m_Score.size()) {
+            if (tick >= b.tick && tick - b.tick < windowBuckets) {
                 m_Stats.evaluatedUs += b.evaluated; m_Stats.failedUs += b.failed;
                 m_Stats.weightedLossUs += b.weightedLoss;
             }
         }
     }
     std::array<Bucket, 100> m_Window{};
-    std::array<ScoreBucket, 300> m_Score{};
+    // Keep the long score history off the controller's stack. The controller
+    // is instantiated in several independent workers and test fixtures.
+    std::vector<ScoreBucket> m_Score = std::vector<ScoreBucket>(MaximumScoreBuckets);
     Sample m_Previous;
     Stats m_Stats;
     uint64_t m_Target = 0, m_First = 0, m_LastAttack = 0, m_LastPressure = 0, m_ReleaseFraction = 0;

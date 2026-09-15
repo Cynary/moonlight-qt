@@ -18,6 +18,15 @@ constexpr uint64_t kFixedPlayoutDelayUs = 3000;
 constexpr uint64_t kPlayoutStartUs = 6000;
 constexpr uint64_t kPlayoutMinimumUs = 1000;
 constexpr uint64_t kPlayoutMaximumUs = 8000;
+// Smooth is intentionally allowed to retain more protection than the other
+// profiles. Keep it below the three-frame ownership limit while allowing the
+// requested extra padding to be observable at ordinary stream rates.
+constexpr uint64_t kSmoothPlayoutMaximumUs = 24000;
+constexpr uint64_t kSmoothPlayoutCapSourcePeriodPerMille = 3000;
+// Smooth's tighter cadence target is intentionally a separate policy value;
+// keep the historical default below unchanged for old captures and direct
+// IntervalBuffer callers.
+constexpr uint64_t kSmoothIntervalToleranceUs = 200;
 // The whole reservoir tail: the delay covers the largest lateness seen in
 // the last thousand admitted frames plus the margin, so a late present is
 // something the exclusions below deliberately left out (a host stall and
@@ -92,6 +101,43 @@ void appendBounded(std::deque<T>& values, T value, size_t limit)
     values.push_back(value);
 }
 
+uint64_t intervalQualityWindowUs(const VrrTimingParameters& parameters)
+{
+    // Revision 7 originally captured playoutReadinessWindowUs for the
+    // readiness estimator, while IntervalBuffer used a fixed 30-second score
+    // history. Identify the new preset tuples here so old revision-7 traces
+    // keep their exact replay behavior without adding a trace-schema field.
+    if (parameters.playoutOnTimeTargetPerMillion == 990000 &&
+        parameters.playoutReadinessWindowUs == 60000000) {
+        return 60000000;
+    }
+    if (parameters.playoutOnTimeTargetPerMillion == 995000 &&
+        parameters.playoutReadinessWindowUs == 120000000) {
+        return 120000000;
+    }
+    if (parameters.playoutOnTimeTargetPerMillion == 999900 &&
+        parameters.playoutReadinessWindowUs == 300000000) {
+        return 300000000;
+    }
+    return 30000000;
+}
+
+uint64_t intervalQualityToleranceUs(const VrrTimingParameters& parameters)
+{
+    // Revision 7 originally used the shared 500 us default. Identify only
+    // the current Smooth tuple so existing revision-7 traces replay exactly;
+    // explicit revision 8 retains its historical 250 us tolerance.
+    if (parameters.playoutResponsiveBuffer == 8) {
+        return 250;
+    }
+    if (parameters.playoutResponsiveBuffer >= 7 &&
+        parameters.playoutOnTimeTargetPerMillion == 999900 &&
+        parameters.playoutReadinessWindowUs == 300000000) {
+        return kSmoothIntervalToleranceUs;
+    }
+    return Vrr13::IntervalBuffer::ToleranceUs;
+}
+
 } // namespace
 
 VrrTimingParameters vrrTimingParametersForSession(
@@ -100,17 +146,27 @@ VrrTimingParameters vrrTimingParametersForSession(
     // Present on a tracked source cadence plus a learned delay. The readiness
     // reserve, its per-frame slewing, and every phase re-anchor are off on this
     // path: they each moved the target between frames the source had spaced
-    // evenly. Explicit parameters keep older policies replayable.
+    // evenly. Preparation readiness is a separate, bounded head start: it
+    // moves renderStart earlier without moving the presentation deadline.
+    // Explicit parameters keep older policies replayable.
     VrrTimingParameters parameters;
-    // Mode zero preserves Smoothest and the historical near-ceiling option.
-    // Captured parameters retain their own defaults for exact replay.
+    // Mode zero is the new Smooth profile. Captured parameters retain their
+    // own defaults for exact replay.
     const int latencyMode = config.latencyMode >= 0 && config.latencyMode <= 2 ?
         config.latencyMode : 1;
     parameters.latencyFixEnabled = config.latencyFix || latencyMode != 0 ? 1 : 0;
     parameters.latencyFixAllRates = latencyMode != 0 ? 1 : 0;
     parameters.latencyFixDelayPeriodPerMille = latencyMode == 2 ? 0 : 500;
     parameters.playoutDelayCapSourcePeriodPerMille = config.latencyFix ? 0 :
-        latencyMode == 2 ? 500 : latencyMode == 1 ? 1000 : 2000;
+        latencyMode == 2 ? 500 : latencyMode == 1 ? 1000 :
+        kSmoothPlayoutCapSourcePeriodPerMille;
+    // The nominal 116 Hz period was shorter than the measured ~99 Hz source
+    // in the deep capture, so it clipped the queue exactly when GPU stalls
+    // needed more room. New live sessions use the fitted source period;
+    // captured policies retain the old nominal-period behavior by default.
+    parameters.playoutDelayCapUsesObservedPeriod = 1;
+    parameters.playoutCapacityTelemetry = 1;
+    parameters.playoutGpuReadinessAdaptation = 1;
     parameters.playoutPredictionOnly = 1;
     // Every normal VRR session uses the interval-quality queue. Historical
     // policies remain selectable only through explicit diagnostic parameters.
@@ -118,11 +174,12 @@ VrrTimingParameters vrrTimingParametersForSession(
     // Retain earned protection between bursts instead of repeatedly shedding
     // it and reacquiring it. Explicit captured values preserve older release.
     parameters.playoutMeanMissHoldUs = latencyMode == 2 ? 6000000 : latencyMode == 1 ? 8000000 : 10000000;
-    parameters.playoutMeanMissReleaseUsPerSecond = latencyMode == 2 ? 125 : 100;
+    parameters.playoutMeanMissReleaseUsPerSecond = latencyMode == 0 ? 50 :
+        latencyMode == 2 ? 125 : 100;
     parameters.playoutOnTimeTargetPerMillion = latencyMode == 2 ? 990000 :
-        latencyMode == 1 ? 995000 : 999500;
-    parameters.playoutReadinessWindowUs = latencyMode == 2 ? 30000000 :
-        latencyMode == 1 ? 60000000 : 120000000;
+        latencyMode == 1 ? 995000 : 999900;
+    parameters.playoutReadinessWindowUs = latencyMode == 2 ? 60000000 :
+        latencyMode == 1 ? 120000000 : 300000000;
     parameters.playoutReadinessHitchThresholdUs = config.readinessHitchFeedback ? 2000 : 0;
     parameters.playoutNativeHitchAdaptation = 0;
     // Display observations remain diagnostics; the queue uses interval quality.
@@ -144,7 +201,8 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.sourcePlayoutDelayUs = kFixedPlayoutDelayUs;
     parameters.playoutDelayStartUs = kPlayoutStartUs;
     parameters.playoutDelayMinimumUs = kPlayoutMinimumUs;
-    parameters.playoutDelayMaximumUs = 16000;
+    parameters.playoutDelayMaximumUs = latencyMode == 0 ?
+        kSmoothPlayoutMaximumUs : 16000;
     parameters.playoutDelayPercentilePerMille = kPlayoutPercentilePerMille;
     parameters.playoutBurstExclusionPerMille = kPlayoutBurstExclusionPerMille;
     // The independent smoothing preference trades timestamp fidelity for
@@ -156,9 +214,9 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.playoutSmoothingMaxLagUs = kPlayoutSmoothingMaxLagUs;
     parameters.playoutMetronomeEnabled = 0;
     parameters.playoutDelayStartPeriodPerMille = kPlayoutStartPeriodPerMille;
-    // A slower desktop/source must not expand the absolute 16 ms ceiling.
+    // A slower desktop/source must not expand the configured-rate ceiling.
     // Source-relative preset caps still impose their smaller limit. Captured
-    // parameters retain the historical expanding limit for exact replay.
+    // parameters retain their recorded limit for exact replay.
     parameters.playoutDelayMaximumPeriodPerMille = 0;
     parameters.playoutSmoothingSnapPerMille = kPlayoutMetronomeSnapPerMille;
     parameters.playoutOffsetReseedFrames = kPlayoutOffsetReseedFrames;
@@ -236,6 +294,7 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
     const uint64_t previousRenderLeadUs = m_RenderLeadUs;
     const uint64_t previousRenderWakeLeadUs = m_RenderWakeLeadUs;
     const uint64_t previousTargetWakeLeadUs = m_TargetWakeLeadUs;
+    const uint64_t previousGpuReadinessLeadUs = m_GpuReadinessLeadUs;
     const uint64_t previousGuardUs = m_GuardUs;
 
     m_SourcePeriodUsQ16 = m_ConfiguredStreamPeriodQ16;
@@ -286,6 +345,8 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
         m_SubmissionSmoothness.reset();
         m_NativeSmoothness.reset();
         m_RequestedPlayoutDelayUs = 0;
+        m_UnclampedRequestedPlayoutDelayUs = 0;
+        m_GpuReadinessLeadUs = 0;
         m_RecentReadiness = m_Parameters.playoutResponsiveBuffer >= 3 ?
             Vrr13::RecentReadiness(m_Parameters.playoutReadinessWindowUs,
                                   m_Parameters.playoutOnTimeTargetPerMillion,
@@ -331,6 +392,10 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
     m_PreparationDurations.clear();
     m_RenderSchedulerDelays.clear();
     m_TargetSchedulerDelays.clear();
+    // A phase rebase invalidates sample timestamps, but the bounded reserve
+    // itself is still useful immediately in the new source epoch.
+    m_GpuReadinessSamples.clear();
+    m_LastGpuReadinessUpdateUs = 0;
     m_Pending = PendingFrame {};
 
     if (retainLearnedBudgets) {
@@ -343,6 +408,8 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
                                       m_Parameters.maximumRenderWakeLeadUs);
         m_TargetWakeLeadUs = std::min(previousTargetWakeLeadUs,
                                       m_Parameters.maximumTargetWakeLeadUs);
+        m_GpuReadinessLeadUs = std::min(previousGpuReadinessLeadUs,
+                                        gpuReadinessCeilingUs());
         m_GuardUs = clampUnsigned(previousGuardUs,
                                   m_BaseGuardUs,
                                   guardCeilingUs());
@@ -357,6 +424,7 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
                                        renderLeadCeilingUs());
         m_RenderWakeLeadUs = 0;
         m_TargetWakeLeadUs = 0;
+        m_GpuReadinessLeadUs = 0;
         m_GuardUs = m_BaseGuardUs;
     }
     clampReadinessReserveToPolicy();
@@ -674,8 +742,16 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     }
     targetUs = std::max(targetUs, earliestSubmissionUs());
     const uint64_t presentationFloorPushUs = targetUs - unflooredTargetUs;
-    const uint64_t totalLeadUs = saturatingAdd(m_RenderLeadUs,
-                                               m_RenderWakeLeadUs);
+    // GPU readiness is learned independently from CPU/render preparation.
+    // Keep it out of targetUs: it is an earlier start opportunity, not extra
+    // presentation latency. The source-period bound prevents the worker from
+    // preparing so early that one frame can occupy the whole pacing window.
+    const uint64_t gpuReadinessLeadUs = this->gpuReadinessLeadUs();
+    const uint64_t totalLeadUs = std::min(
+        m_SourcePeriodUs,
+        saturatingAdd(saturatingAdd(m_RenderLeadUs,
+                                    m_RenderWakeLeadUs),
+                      gpuReadinessLeadUs));
     uint64_t renderStartUs = targetUs > totalLeadUs ?
         targetUs - totalLeadUs : 0;
     if (timestampPlayout && m_Parameters.playoutPrepareOnArrival != 0) {
@@ -713,8 +789,12 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
             activeSmoothnessFeedback(nowUs).protectionUs() :
             std::max(m_SubmissionSmoothness.protectionUs(),
                      m_NativeSmoothness.protectionUs());
-    decision.requestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
-    decision.playoutCapacityLimited = m_RequestedPlayoutDelayUs > playoutDelayMaximumUs();
+    decision.requestedPlayoutDelayUs =
+        m_Parameters.playoutCapacityTelemetry != 0 ?
+            m_UnclampedRequestedPlayoutDelayUs : m_RequestedPlayoutDelayUs;
+    decision.playoutCapacityLimited =
+        m_Parameters.playoutCapacityTelemetry != 0 &&
+        m_UnclampedRequestedPlayoutDelayUs > playoutDelayMaximumUs();
     decision.submissionSmoothnessSamples = m_SubmissionSmoothness.samples();
     decision.submissionSmoothnessMisses = m_SubmissionSmoothness.misses();
     decision.nativeSmoothnessSamples = m_NativeSmoothness.samples();
@@ -740,6 +820,7 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     decision.timingBudgetUs = timingBudgetUs();
     decision.renderLeadUs = m_RenderLeadUs;
     decision.renderWakeLeadUs = m_RenderWakeLeadUs;
+    decision.gpuReadinessLeadUs = gpuReadinessLeadUs;
     decision.targetWakeLeadUs = m_TargetWakeLeadUs;
     const uint64_t learnedHeadroomUs = decision.headroomUs;
     const bool cadenceUnstable = rebased || !cadence.eligible ||
@@ -1483,6 +1564,8 @@ bool VrrTimingController::acceptSourcePeriodQ16(uint64_t periodUsQ16)
     m_RenderLeadUs = clampUnsigned(m_RenderLeadUs,
                                    renderLeadFloorUs(),
                                    renderLeadCeilingUs());
+    m_GpuReadinessLeadUs = std::min(m_GpuReadinessLeadUs,
+                                    gpuReadinessCeilingUs());
     m_GuardUs = clampUnsigned(m_GuardUs,
                               m_BaseGuardUs,
                               guardCeilingUs());
@@ -1505,12 +1588,21 @@ void VrrTimingController::anchorSourceTime(uint64_t sourceTimeUs)
 }
 
 void VrrTimingController::notePreparationDuration(
-    uint64_t preparationDurationUs, uint64_t acquisitionWaitUs, uint64_t preparationCompleteUs)
+    uint64_t preparationDurationUs, uint64_t acquisitionWaitUs,
+    uint64_t preparationCompleteUs, uint64_t gpuReadyWaitUs)
 {
     // Swapchain availability is not work that a larger jitter buffer fixes.
     // The worker already excludes its intentional waits from this duration.
     if (m_Parameters.playoutHistoryEnabled != 0) {
         preparationDurationUs -= std::min(preparationDurationUs, acquisitionWaitUs);
+    }
+    // D3D preparation includes the renderer's wait for the source-readiness
+    // fence. Once that wait has its own bounded head start, do not charge it
+    // a second time as generic render work. Legacy/replay policies leave this
+    // disabled, preserving their exact learned render lead.
+    if (m_Parameters.playoutGpuReadinessAdaptation != 0) {
+        preparationDurationUs -= std::min(preparationDurationUs,
+                                           gpuReadyWaitUs);
     }
     if (!m_Pending.valid) {
         return;
@@ -1518,6 +1610,68 @@ void VrrTimingController::notePreparationDuration(
     m_Pending.hasPreparationDuration = true;
     m_Pending.preparationDurationUs = preparationDurationUs;
     m_Pending.preparationCompleteUs = preparationCompleteUs;
+}
+
+void VrrTimingController::noteGpuReadyWait(uint64_t waitUs, bool completed,
+                                           uint64_t completionUs)
+{
+    if (m_Parameters.playoutGpuReadinessAdaptation == 0 || !completed) {
+        return;
+    }
+
+    const uint64_t at = completionUs != 0 ? completionUs :
+        m_LastDecodeCompleteUs;
+    if (at == 0) {
+        return;
+    }
+
+    constexpr size_t kMaximumSamples = 512;
+    const uint64_t windowUs = std::max<uint64_t>(
+        1, m_Parameters.playoutGpuReadinessWindowUs);
+    while (m_GpuReadinessSamples.size() > 1 &&
+           (m_GpuReadinessSamples.size() > kMaximumSamples ||
+            (at > windowUs &&
+             m_GpuReadinessSamples.front().completionUs < at - windowUs))) {
+        m_GpuReadinessSamples.pop_front();
+    }
+    m_GpuReadinessSamples.push_back({at, waitUs});
+    while (m_GpuReadinessSamples.size() > kMaximumSamples) {
+        m_GpuReadinessSamples.pop_front();
+    }
+
+    std::deque<uint64_t> waits;
+    waits.resize(0);
+    for (const GpuReadinessSample& sample : m_GpuReadinessSamples) {
+        waits.push_back(sample.waitUs);
+    }
+    const uint64_t desired = clampUnsigned(
+        saturatingAdd(percentile(waits, m_Parameters.playoutGpuReadinessPercentile),
+                      m_Parameters.playoutGpuReadinessMarginUs),
+        0, gpuReadinessCeilingUs());
+    if (desired > m_GpuReadinessLeadUs) {
+        m_GpuReadinessLeadUs = std::min(
+            desired,
+            saturatingAdd(m_GpuReadinessLeadUs,
+                          std::max<uint64_t>(1,
+                              m_Parameters.playoutGpuReadinessAttackUs)));
+    }
+    else if (desired < m_GpuReadinessLeadUs) {
+        const uint64_t elapsed = m_LastGpuReadinessUpdateUs != 0 &&
+                at >= m_LastGpuReadinessUpdateUs ?
+            std::min<uint64_t>(at - m_LastGpuReadinessUpdateUs, 33333) :
+            std::max<uint64_t>(1, m_SourcePeriodUs);
+        const uint64_t rate = m_Parameters.playoutGpuReadinessReleaseUsPerSecond;
+        const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+        const uint64_t releaseNumerator = rate != 0 &&
+                elapsed > maximum / rate ? maximum : rate * elapsed;
+        const uint64_t releaseUs = rate == 0 ? 0 :
+            std::max<uint64_t>(1, releaseNumerator / kMicrosecondsPerSecond);
+        m_GpuReadinessLeadUs -= std::min(
+            m_GpuReadinessLeadUs - desired, releaseUs);
+    }
+    m_GpuReadinessLeadUs = std::min(m_GpuReadinessLeadUs,
+                                    gpuReadinessCeilingUs());
+    m_LastGpuReadinessUpdateUs = at;
 }
 
 void VrrTimingController::noteSchedulerDelays(uint64_t renderDelayUs,
@@ -1573,7 +1727,8 @@ void VrrTimingController::noteSubmission(bool submitted, bool cancelled,
                 playoutDelayMinimumUs(), playoutDelayMaximumUs(),
                 m_Parameters.playoutMeanMissHoldUs, m_Parameters.playoutMeanMissReleaseUsPerSecond,
                 m_Parameters.playoutResponsiveBuffer >= 7, m_Parameters.playoutOnTimeTargetPerMillion,
-                m_Parameters.playoutResponsiveBuffer == 8 ? 250 : Vrr13::IntervalBuffer::ToleranceUs);
+                intervalQualityToleranceUs(m_Parameters),
+                intervalQualityWindowUs(m_Parameters));
         }
         else m_MeanMissBuffer.observe(submissionUs, ready > deadline ? ready - deadline : 0,
             p.applied, submitted && !cancelled && m_Pending.hasPreparationDuration &&
@@ -1602,6 +1757,8 @@ void VrrTimingController::noteSubmission(bool submitted, bool cancelled,
             };
             m_PlayoutHistory.observe(ns(result.demand), ns(p.applied), ns(submissionUs));
             if (result.demand) {
+                m_UnclampedRequestedPlayoutDelayUs = std::max(
+                    m_UnclampedRequestedPlayoutDelayUs, result.demand);
                 m_RequestedPlayoutDelayUs = std::max(m_RequestedPlayoutDelayUs,
                     std::min(result.demand, playoutDelayMaximumUs()));
             }
@@ -1624,8 +1781,11 @@ void VrrTimingController::noteSubmission(bool submitted, bool cancelled,
                 // teach native service latency from it. It may guide padding
                 // only while verified native feedback is unavailable.
                 if (demand && !m_Parameters.playoutPredictionOnly &&
-                        !hasRecentNativeFeedback(submissionUs))
+                        !hasRecentNativeFeedback(submissionUs)) {
+                    m_UnclampedRequestedPlayoutDelayUs = std::max(
+                        m_UnclampedRequestedPlayoutDelayUs, demand);
                     m_RequestedPlayoutDelayUs = std::max(m_RequestedPlayoutDelayUs, demand);
+                }
             }
         }
         else m_SubmissionSmoothness.breakSequence();
@@ -1735,6 +1895,8 @@ void VrrTimingController::notePresentation(const Vrr13::PresentationObservation&
             // Only a new, matched native interval miss authorizes growth.
             // Demand belongs to the delayed frame's original padding, so a
             // catch-up sample cannot repeatedly charge today's larger buffer.
+            m_UnclampedRequestedPlayoutDelayUs = std::max(
+                m_UnclampedRequestedPlayoutDelayUs, demand);
             m_RequestedPlayoutDelayUs = std::max(m_RequestedPlayoutDelayUs, demand);
         }
     }, m_Parameters.playoutRequireDisplayEvents != 0);
@@ -2003,6 +2165,11 @@ uint64_t VrrTimingController::renderLeadUs() const
     return m_RenderLeadUs;
 }
 
+uint64_t VrrTimingController::gpuReadinessLeadUs() const
+{
+    return std::min(m_GpuReadinessLeadUs, gpuReadinessCeilingUs());
+}
+
 uint64_t VrrTimingController::targetWakeLeadUs() const
 {
     return m_TargetWakeLeadUs;
@@ -2197,14 +2364,29 @@ uint64_t VrrTimingController::latencyFixDelayLimitUs() const
 uint64_t VrrTimingController::playoutDelayCapUs() const
 {
     if (m_Parameters.playoutDelayCapSourcePeriodPerMille != 0) {
+        const uint64_t capPeriodUs =
+            m_Parameters.playoutDelayCapUsesObservedPeriod != 0 ?
+                m_SourcePeriodUs :
+                (m_Parameters.playoutResponsiveBuffer ?
+                     m_ConfiguredStreamPeriodUs : m_SourcePeriodUs);
         return scaledPerMille(
-            m_Parameters.playoutResponsiveBuffer ? m_ConfiguredStreamPeriodUs : m_SourcePeriodUs,
+            capPeriodUs,
             m_Parameters.playoutDelayCapSourcePeriodPerMille);
     }
     // Parameterized captures predating the source-frame preset cap retain the
     // old display-relative limiter for exact replay.
     return m_LatencyFixActive ? latencyFixDelayLimitUs() :
         std::numeric_limits<uint64_t>::max();
+}
+
+uint64_t VrrTimingController::gpuReadinessCeilingUs() const
+{
+    if (m_Parameters.playoutGpuReadinessAdaptation == 0) {
+        return 0;
+    }
+    return std::min(
+        std::max<uint64_t>(1, m_Parameters.playoutGpuReadinessMaximumUs),
+        std::max<uint64_t>(1, m_SourcePeriodUs));
 }
 
 void VrrTimingController::updateLatencyFixState()
@@ -2224,6 +2406,7 @@ void VrrTimingController::updateLatencyFixState()
         // when the source leaves this mode. Fresh lower-rate misses can still
         // acquire protection through the ordinary feedback path.
         m_RequestedPlayoutDelayUs = std::min(m_RequestedPlayoutDelayUs, latencyFixDelayLimitUs());
+        m_UnclampedRequestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
     }
     m_LatencyFixActive = active;
 }
@@ -2465,10 +2648,14 @@ void VrrTimingController::updatePlayoutHistory(
                 m_MeanMissBuffer.breakSequence();
                 if (rebased || cadence.phaseDiscontinuity) m_IntervalBuffer.breakSequence();
             }
-            m_RequestedPlayoutDelayUs = clampUnsigned(
+            const uint64_t requestedDemandUs =
                 m_Parameters.playoutResponsiveBuffer >= 6 ?
-                    m_IntervalBuffer.demand(m_AppliedPlayoutDelayUs) : m_MeanMissBuffer.demand(m_AppliedPlayoutDelayUs),
-                playoutDelayMinimumUs(), playoutDelayMaximumUs());
+                    m_IntervalBuffer.demand(m_AppliedPlayoutDelayUs) :
+                    m_MeanMissBuffer.demand(m_AppliedPlayoutDelayUs);
+            m_UnclampedRequestedPlayoutDelayUs = requestedDemandUs;
+            m_RequestedPlayoutDelayUs = clampUnsigned(
+                requestedDemandUs, playoutDelayMinimumUs(),
+                playoutDelayMaximumUs());
             // Increases spread over several frames; release is time-based in
             // the observer. No prediction or cached percentile can authorize growth.
             if (m_RequestedPlayoutDelayUs > m_AppliedPlayoutDelayUs)
@@ -2500,6 +2687,7 @@ void VrrTimingController::updatePlayoutHistory(
                     !m_RecentReadiness.allowsGrowth(at, m_AppliedPlayoutDelayUs)) {
                 requestedPlayoutDelayUs = m_AppliedPlayoutDelayUs;
             }
+            m_UnclampedRequestedPlayoutDelayUs = requestedPlayoutDelayUs;
             m_RequestedPlayoutDelayUs = requestedPlayoutDelayUs;
             const auto desired = clampUnsigned(m_RequestedPlayoutDelayUs,
                 playoutDelayMinimumUs(), playoutDelayMaximumUs());
@@ -2534,10 +2722,12 @@ void VrrTimingController::updatePlayoutHistory(
             // authorize growth. Tolerance was already applied at the event;
             // do not add another fixed readiness margin.
             m_RequestedPlayoutDelayUs = std::min(m_RequestedPlayoutDelayUs, protection);
+            m_UnclampedRequestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
         }
         else {
             m_RequestedPlayoutDelayUs = saturatingAdd(protection,
                                                     m_Parameters.playoutDelayMarginUs);
+            m_UnclampedRequestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
         }
         const uint64_t desired = clampUnsigned(m_RequestedPlayoutDelayUs,
             playoutDelayMinimumUs(), playoutDelayMaximumUs());
@@ -2564,6 +2754,7 @@ void VrrTimingController::updatePlayoutHistory(
             uint64_t(m_PlayoutHistory.common() / 1000), 3000);
         // A demand beyond storage capacity must not pin release forever or
         // resurrect growth later when capacity becomes available again.
+        m_UnclampedRequestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
         m_RequestedPlayoutDelayUs = std::min(m_RequestedPlayoutDelayUs,
                                             playoutDelayMaximumUs());
         if (m_RequestedPlayoutDelayUs <= m_AppliedPlayoutDelayUs) {
@@ -2632,6 +2823,7 @@ void VrrTimingController::updatePlayoutHistory(
     // the readiness demand, so do not subtract that headroom again here.
     m_RequestedPlayoutDelayUs = saturatingAdd(protection,
         m_Parameters.playoutPredictionEnabled ? m_Parameters.playoutDelayMarginUs : 0);
+    m_UnclampedRequestedPlayoutDelayUs = m_RequestedPlayoutDelayUs;
     const uint64_t desired = clampUnsigned(m_RequestedPlayoutDelayUs,
         playoutDelayMinimumUs(), playoutDelayMaximumUs());
     // Bound attack below the smoothness threshold; production responds faster
@@ -2675,6 +2867,7 @@ VrrTimingDiagnostics VrrTimingController::diagnostics() const
     value.appliedReadinessReserveUs = m_AppliedReadinessReserveUs;
     value.renderBaselineUs = m_RenderBaselineUs;
     value.renderInsuranceUs = renderInsuranceUs();
+    value.gpuReadinessLeadUs = gpuReadinessLeadUs();
     value.pacingLatencyBudgetUs = pacingLatencyBudgetUs();
     value.cadenceSamples = m_CadenceSamples.size();
     value.rateCandidateSamples = m_RateCandidateSamples.size();

@@ -65,7 +65,7 @@ class ReportTest(unittest.TestCase):
         r = self.analyze(rows)
         self.assertNotIn("client_processing_us", r["metrics"])
         self.assertIn("N/A", report.markdown([r]))
-        self.assertIn("Missing measured presets: Balanced, Smoothest", report.markdown([r]))
+        self.assertIn("Missing measured presets: Balanced Target, Smooth", report.markdown([r]))
 
     def test_invalid_partition_is_not_clamped_to_zero(self):
         r = self.analyze([row(1, prepare_us=9000)])
@@ -118,14 +118,14 @@ class ReportTest(unittest.TestCase):
             result = report.analyze(path)
         self.assertEqual(len(result["segments"]), 4)
         self.assertEqual([s["preset"] for s in result["segments"]],
-                         ["Lowest latency", "Balanced", "Smoothest", "Lowest latency"])
+                         ["Low Latency", "Balanced Target", "Smooth", "Low Latency"])
         for segment in result["segments"]:
             self.assertEqual(segment["rows"], 3)
             self.assertEqual(segment["cadence"]["jerk_pairs"], 1)
             self.assertTrue(segment["complete_capture"])
             self.assertEqual(len(segment["policy_fingerprints"]), 1)
         text = report.markdown([result])
-        self.assertIn("Smoothest (phase 2)", text)
+        self.assertIn("Smooth (phase 2)", text)
         self.assertNotIn("Missing measured presets", text)
 
 
