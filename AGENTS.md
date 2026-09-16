@@ -157,7 +157,7 @@ where `scripts\vswhere.exe` does not find them, so `build-arch.bat` fails
 with "Cannot run compiler 'cl'" unless `vcvarsall` is initialized first. Put
 the Qt and 7-Zip directories on `PATH`, set the custom package version, and
 build inside the MSVC environment. For a GitHub release the version is the
-tag without the `v`, which names the MSI and ZIP assets:
+tag without the `v`, which names the setup EXE and ZIP assets:
 
 ```powershell
 $env:Path = "C:\Users\Chase\sources\.tools\Qt\6.11.1\msvc2022_64\bin;C:\Users\Chase\sources\.tools\7zip;$env:Path"
@@ -180,18 +180,22 @@ uploaded files, and publish last:
 ```powershell
 $gh = "C:\Users\Chase\sources\.tools\gh\bin\gh.exe"
 & $gh release create v6.1.0-vrr12 --repo Nonary/moonlight-qt --draft --prerelease --target vrr12 --title "..." --notes-file notes.md
-& $gh release upload v6.1.0-vrr12 --repo Nonary/moonlight-qt .\build\installer-x64-release\MoonlightSetup-x64-6.1.0-vrr12.msi .\build\installer-x64-release\MoonlightPortable-x64-6.1.0-vrr12.zip
+& $gh release upload v6.1.0-vrr12 --repo Nonary/moonlight-qt .\build\installer-release\MoonlightSetup-6.1.0-vrr12.exe .\build\installer-x64-release\MoonlightPortable-x64-6.1.0-vrr12.zip
 ```
 
-The Windows assets are the MSI and the portable ZIP from `build-arch.bat`.
-The script leaves the MSI as `build\build-x64-release\Moonlight.msi`; copy
-it to `build\installer-x64-release\MoonlightSetup-x64-<version>.msi` to
-match the release naming. Copy `vrrreplay.exe` and `decode-vrr-trace.py`
-into the deploy tree and recreate the ZIP before uploading so the portable
-package carries the diagnostics, as the release notes promise. The Linux AppImage and Flatpak
-assets are not produced by this repository's Windows tooling; the CI
-workflow builds an AppImage named by commit SHA on every push, and the
-Flatpak comes from outside this repository.
+The Windows assets are the Burn setup EXE from `generate-bundle.bat` and the
+portable ZIP from `build-arch.bat`. Do **not** publish
+`build\build-x64-release\Moonlight.msi`: that is the inner payload, has no
+VC++ redistributable, and is not the user-facing installer. After both
+architectures are built, `generate-bundle.bat` writes
+`build\installer-release\MoonlightSetup-<version>.exe`. VRR tags
+`6.1.0-vrrN` stamp the PE/MSI product version as `6.2.N` so Windows Installer
+can replace stock Moonlight 6.1.0 and earlier VRR MSIs. Copy `vrrreplay.exe`
+and `decode-vrr-trace.py` into the deploy tree and recreate the ZIP before
+uploading so the portable package carries the diagnostics, as the release
+notes promise. The Linux AppImage and Flatpak assets are not produced by this
+repository's Windows tooling; the CI workflow builds an AppImage named by
+commit SHA on every push, and the Flatpak comes from outside this repository.
 
 The script cleans and recreates these directories, compiles Moonlight, deploys
 the Qt/runtime dependencies, builds the MSI, and creates the base portable ZIP:

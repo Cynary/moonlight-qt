@@ -631,7 +631,14 @@ macx {
     }
 }
 
+# Displayed version stays CI_VERSION (e.g. 6.1.0-vrr17). Windows PE/MSI
+# ProductVersion can only use three numeric fields and must increase past
+# stock Moonlight 6.1.0, so VRR builds map 6.1.0-vrrN to 6.2.N.
 VERSION = "$$BASE_VERSION"
+PE_VERSION = $$(MOONLIGHT_PE_VERSION)
+!isEmpty(PE_VERSION) {
+    VERSION = "$$PE_VERSION"
+}
 DEFINES += VERSION_STR=\\\"$$MOONLIGHT_VERSION\\\"
 
 SOURCES += $$PWD/streaming/video/ffmpeg-renderers/pacer/vrr/profile.cpp

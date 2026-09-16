@@ -186,12 +186,23 @@ jobs:
             bash scripts/generate-dmg.sh Release
           }
 
-      - name: Stage Windows x64 installer
+      - name: Stage Windows installer bundle
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Copy-Item build/build-x64-release/Moonlight.msi `
-            "build/installer-x64-release/MoonlightSetup-x64-$Env:CI_VERSION.msi"
+          $ci = $Env:CI_VERSION
+          $bundle = "build/installer-release/MoonlightSetup-$ci.exe"
+          if (!(Test-Path $bundle)) { throw "Missing installer bundle $bundle" }
+          if ($ci -match '-vrr(\d+)$') {
+            $expected = "6.2.$($Matches[1])"
+            $exe = "build/build-x64-release/app/release/Moonlight.exe"
+            $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
+            if ($info.FileVersion -notlike "$expected*") {
+              throw "Moonlight.exe FileVersion is '$($info.FileVersion)', expected $expected"
+            }
+            Write-Host "Windows PE/MSI version $($info.FileVersion)"
+          }
+          Copy-Item $bundle "build/installer-x64-release/MoonlightSetup-$ci.exe"
 
       - name: Upload Windows release packages
         uses: actions/upload-artifact@v6
@@ -199,7 +210,7 @@ jobs:
         with:
           name: Moonlight-Windows-Release-${{ env.CI_VERSION }}
           path: |
-            build/installer-x64-release/MoonlightSetup-x64-${{ env.CI_VERSION }}.msi
+            build/installer-x64-release/MoonlightSetup-${{ env.CI_VERSION }}.exe
             build/installer-x64-release/MoonlightPortable-x64-${{ env.CI_VERSION }}.zip
           compression-level: 0
           if-no-files-found: error
