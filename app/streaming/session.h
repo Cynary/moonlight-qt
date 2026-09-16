@@ -121,6 +121,11 @@ public:
         return m_OverlayManager;
     }
 
+    int streamColorRange() const
+    {
+        return m_StreamConfig.colorRange;
+    }
+
     QString vrrCalibrationContext() const;
 
     void flushWindowEvents();
@@ -192,7 +197,8 @@ private:
                        SDL_Window* window, int videoFormat, int width, int height,
                        int frameRate, bool enableVsync, bool enableFramePacing,
                        bool testOnly, IVideoDecoder*& chosenDecoder,
-                       bool enableVrr = false, int vrrDisplayRefreshHz = 0,
+                       bool enableVrr = false, bool preferVrrRenderer = false,
+                       int vrrDisplayRefreshHz = 0,
                        bool* effectiveVrr = nullptr, bool smoothVrrFrameTiming = true,
                        bool gamescopeMailbox = false, int vrrLatencyMode = 0,
                        bool gamescopeRepaint = false);

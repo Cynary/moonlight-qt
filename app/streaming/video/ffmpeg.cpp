@@ -16,6 +16,7 @@ extern "C" {
 
 #include "ffmpeg-renderers/sdlvid.h"
 #include "ffmpeg-renderers/genhwaccel.h"
+#include "vrrrenderpolicy.h"
 
 #ifdef Q_OS_WIN32
 #include "ffmpeg-renderers/dxva2.h"
@@ -392,11 +393,13 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
 #ifdef HAVE_LIBPLACEBO_VULKAN
 #if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)
     // Vulkan is the only Linux frontend that implements IVrrFramePresenter.
-    // Treat an active VRR request as an explicit Vulkan preference here so
-    // renderer auto-selection cannot silently choose EGL/DRM/direct output and
-    // leave Pacer to fall back to fixed V-sync. If Vulkan initialization fails,
-    // the existing alternate/direct pass still provides the fixed fallback.
-    const bool preferVulkanForVrr = params->enableVrr;
+    // Treat an active VRR request, or the probe's matching renderer policy,
+    // as an explicit Vulkan preference so auto-selection cannot choose EGL
+    // for the host color-range request and Vulkan for playback. If Vulkan
+    // initialization fails, the existing alternate/direct pass still provides
+    // the fixed fallback.
+    const bool preferVulkanForVrr =
+        decoderPrefersVrrCapableRenderer(params->enableVrr, params->preferVrrRenderer);
 #else
     const bool preferVulkanForVrr = false;
 #endif
@@ -432,7 +435,9 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
                 // rendering HDR with Vulkan if possible since it's more fully featured than DRM.
                 if (preferVulkanForVrr) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "VRR requested: preferring Vulkan frontend on Linux");
+                                params->enableVrr ?
+                                    "VRR requested: preferring Vulkan frontend on Linux" :
+                                    "VRR renderer policy: preferring Vulkan frontend on Linux without enabling VRR presentation");
                 }
                 m_FrontendRenderer = new PlVkRenderer(AV_HWDEVICE_TYPE_NONE, m_BackendRenderer);
                 if (initializeRendererInternal(m_FrontendRenderer, params) && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_HDR_SUPPORT)) {
@@ -477,7 +482,9 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
             if (preferVulkanForVrr || qgetenv("PREFER_VULKAN") == "1") {
                 if (preferVulkanForVrr) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "VRR requested: preferring Vulkan frontend on Linux");
+                                params->enableVrr ?
+                                    "VRR requested: preferring Vulkan frontend on Linux" :
+                                    "VRR renderer policy: preferring Vulkan frontend on Linux without enabling VRR presentation");
                 }
                 m_FrontendRenderer = new PlVkRenderer(AV_HWDEVICE_TYPE_NONE, m_BackendRenderer);
                 if (initializeRendererInternal(m_FrontendRenderer, params)) {

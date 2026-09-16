@@ -5,7 +5,8 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Source baseline: `352f4827` plus removal of the Allow tearing preference
+Source baseline: `adb5d787` plus Linux VRR probe/playback color-range
+alignment (2026-09-16), originally `352f4827` plus removal of the Allow tearing preference
 (2026-09-15),
 client-processing,
 vrr14-style compact stats reporting, restored Reduce judder, reconnect
@@ -1668,6 +1669,15 @@ selected for the surface at startup: Mailbox on ordinary Wayland, Immediate on
 X11/KMSDRM, and Immediate on Gamescope. Gamescope additionally tries Mailbox
 when the dormant SteamOS experiment is enabled, according to exposed surface
 capabilities.
+
+The startup decoder probe that asks the host for a color range must use that
+same Linux Vulkan preference without activating VRR presentation.
+`chooseDecoder()` still forbids `enableVrr` in test-only mode; the probe passes
+`preferVrrRenderer` from the session VRR snapshot instead. Otherwise an EGL
+probe can request limited-range video while VRR playback interprets it as full
+range, which washes out SDR. Vulkan's AMF AV1 full-range mapping override
+applies only when the negotiated stream range is full. HDR remains gated on the
+client's Enable HDR preference; VRR does not advertise 10-bit formats by itself.
 
 After rendering a VRR frame, Linux Vulkan flushes the libplacebo queue and
 polls the acquired `pl_swapchain_frame.fbo` with `pl_tex_poll(..., 0)` until

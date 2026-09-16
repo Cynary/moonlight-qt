@@ -259,11 +259,12 @@ vrr\release\tst_vrrtimingcontroller.exe
 vrr\release\tst_vrrratepolicy.exe
 vrr\release\tst_vrrpacingworker.exe
 vrr\release\tst_vrrreplayconfig.exe
+vrr\release\tst_vrrrenderpolicy.exe
 vrr\release\vrrreplay.exe --help
 ```
 
 Finish all pacing, controller, replay, and test-source edits before this build.
-If any such source is edited afterward, run `nmake` again and rerun all five
+If any such source is edited afterward, run `nmake` again and rerun all six
 checks. Do not assume a successful application build rebuilt the diagnostics.
 
 The test executables need the deployed runtime DLLs and Qt on `PATH`. Run them
@@ -280,7 +281,8 @@ $tests = @(
     "tst_vrrtimingcontroller.exe",
     "tst_vrrratepolicy.exe",
     "tst_vrrpacingworker.exe",
-    "tst_vrrreplayconfig.exe"
+    "tst_vrrreplayconfig.exe",
+    "tst_vrrrenderpolicy.exe"
 )
 foreach ($test in $tests) {
     & ".\build\tests-vrr\vrr\release\$test"

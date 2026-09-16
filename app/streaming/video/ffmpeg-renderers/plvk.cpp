@@ -4,6 +4,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "streaming/video/vrrrenderpolicy.h"
 
 #include <Limelight.h>
 
@@ -30,6 +31,11 @@ extern "C" {
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
 #define VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR ((VkVideoCodecOperationFlagBitsKHR)0x00000004)
 #endif
+
+static_assert(COLOR_RANGE_LIMITED == kNegotiatedColorRangeLimited,
+              "vrrrenderpolicy limited range must match Limelight.h");
+static_assert(COLOR_RANGE_FULL == kNegotiatedColorRangeFull,
+              "vrrrenderpolicy full range must match Limelight.h");
 
 #ifdef HAVE_DRM_MASTER_HOOKS
 extern "C" {
@@ -648,6 +654,14 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     selectPresentationMode(params);
     m_VrrAdaptivePresentMode = m_VkPresentMode;
 
+    if (const Session* session = Session::get()) {
+        const int negotiatedRange = session->streamColorRange();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Vulkan mapped-frame color range: negotiated %s, AMF full-range override %s",
+                    negotiatedRange == COLOR_RANGE_FULL ? "full" : "limited",
+                    vulkanShouldForceMappedFullRange(negotiatedRange) ? "enabled" : "disabled");
+    }
+
     // Keep one spare image available while the compositor owns the displayed
     // and queued images. At rates close to the panel ceiling, a double-buffered
     // swapchain can otherwise block preparation until after the presentation
@@ -1038,11 +1052,16 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
         mappedFrame->color.hdr.min_luma = PL_COLOR_HDR_BLACK;
     }
 
-    // HACK: AMF AV1 encoding on the host PC does not set full color range properly in the
-    // bitstream data, so libplacebo incorrectly renders the content as limited range.
-    //
-    // As a workaround, set full range manually in the mapped frame ourselves.
-    mappedFrame->repr.levels = PL_COLOR_LEVELS_FULL;
+    // HACK: AMF AV1 encoding on the host PC does not set full color range properly
+    // in the bitstream data, so libplacebo incorrectly renders that content as
+    // limited range. Force full range only when the host was asked for full-range
+    // video. An EGL probe can still request limited range; blindly overriding
+    // here would wash out that stream if playback later selects Vulkan.
+    if (const Session* session = Session::get()) {
+        if (vulkanShouldForceMappedFullRange(session->streamColorRange())) {
+            mappedFrame->repr.levels = PL_COLOR_LEVELS_FULL;
+        }
+    }
 
     return true;
 }

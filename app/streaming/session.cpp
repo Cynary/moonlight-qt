@@ -283,7 +283,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             SDL_Window* window, int videoFormat, int width, int height,
                             int frameRate, bool enableVsync, bool enableFramePacing,
                             bool testOnly, IVideoDecoder*& chosenDecoder,
-                            bool enableVrr, int vrrDisplayRefreshHz,
+                            bool enableVrr, bool preferVrrRenderer, int vrrDisplayRefreshHz,
                             [[maybe_unused]] bool* effectiveVrr, bool smoothVrrFrameTiming,
                             bool gamescopeMailbox, int vrrLatencyMode, bool gamescopeRepaint)
 {
@@ -303,6 +303,9 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.enableVsync = enableVsync;
     params.enableFramePacing = enableFramePacing;
     params.enableVrr = enableVrr;
+    // Playback already sets enableVrr; the probe uses preferVrrRenderer alone so
+    // it can match that renderer/color policy without starting VRR presentation.
+    params.preferVrrRenderer = preferVrrRenderer || enableVrr;
     params.vrrLatencyMode = vrrLatencyMode;
     params.gamescopeMailbox = gamescopeMailbox;
     params.gamescopeRepaint = gamescopeRepaint;
@@ -318,6 +321,10 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "VRR %s",
                 enableVrr ? "enabled" : "disabled");
+    if (params.preferVrrRenderer && !enableVrr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "VRR renderer policy active for probe; VRR presentation disabled");
+    }
 
 #ifdef HAVE_SLVIDEO
     // SLVideo owns its own presentation path and has no VRR backend. Try it
@@ -550,6 +557,9 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     // here because this is operating on the real streaming window, and
     // instantiating Metal or AVSBDL renderers can interfere with MoltenVK's
     // attempt to change the window's colorspace, causing washed out colors.
+    // Match playback's Linux Vulkan preference so the host color-range request
+    // is valid for the renderer that will actually present. Do not pass
+    // enableVrr here: test-only probing must not start VRR presentation.
     if (!chooseDecoder(m_PresentationSettings.decoderSelection,
                        m_PresentationSettings.rendererSelection,
                        window,
@@ -557,7 +567,9 @@ bool Session::populateDecoderProperties(SDL_Window* window)
                        m_StreamConfig.width,
                        m_StreamConfig.height,
                        m_StreamConfig.fps,
-                       false, false, true, decoder)) {
+                       false, false, true, decoder,
+                       false,
+                       m_PresentationSettings.enableVrr)) {
         return false;
     }
 
@@ -587,6 +599,11 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     else {
         m_StreamConfig.colorRange = decoder->getDecoderColorRange();
     }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Negotiated host color range: %s (VRR renderer policy %s)",
+                m_StreamConfig.colorRange == COLOR_RANGE_FULL ? "full" : "limited",
+                m_PresentationSettings.enableVrr ? "active" : "inactive");
 
     if (decoder->isAlwaysFullScreen()) {
         m_IsFullScreen = true;
@@ -2400,6 +2417,7 @@ void Session::exec()
                                m_PresentationSettings.enableFramePacing,
                                false,
                                s_ActiveSession->m_VideoDecoder,
+                               m_PresentationSettings.enableVrr,
                                m_PresentationSettings.enableVrr,
                                m_PresentationSettings.refreshRate,
                                &m_PresentationSettings.enableVrr,

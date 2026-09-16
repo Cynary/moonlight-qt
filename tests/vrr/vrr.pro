@@ -25,6 +25,8 @@ incomingtiming.file = $$PWD/incomingtiming.pro
 SUBDIRS += incomingtiming
 amddecodepolicy.file = $$PWD/amddecodepolicy.pro
 SUBDIRS += amddecodepolicy
+vrrrenderpolicy.file = $$PWD/vrrrenderpolicy.pro
+SUBDIRS += vrrrenderpolicy
 gamescopecomposition.file = $$PWD/gamescopecomposition.pro
 SUBDIRS += gamescopecomposition
 linux:packagesExist(vulkan) {
