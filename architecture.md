@@ -5,8 +5,8 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Source baseline: `3c372cce` plus per-frame safety-headroom correction and the
-Allow tearing comparison setting (2026-09-12),
+Source baseline: `352f4827` plus removal of the Allow tearing preference
+(2026-09-15),
 client-processing,
 vrr14-style compact stats reporting, restored Reduce judder, reconnect
 trace preservation, motion cadence telemetry, hard buffer ceiling, AMD low-latency decode request, observed-latency trace diagnostics, and removal of the latency oscillation test,
@@ -62,8 +62,8 @@ have been retired. Their saved settings (and the older Mailbox preference) are
 ignored and removed on settings save. Session startup no longer invokes the
 composition guard and passes repaint=false to the decoder. Dormant renderer
 helpers and their deterministic tests remain available for development.
-With Allow tearing enabled, production retains its original Immediate/WSI FIFO
-selection. The separate permission comparison below can select Mailbox.
+Production retains its Immediate/WSI FIFO selection; adaptive presentation
+permission is owned by the VRR backend rather than a user preference.
 
 ### Source-offset transition recovery (2026-09-15)
 
@@ -95,39 +95,30 @@ See [offset-recovery investigation](docs/vrr-offset-recovery.md) for the supplie
 trace evidence, implementation tradeoffs and pending validation. No build,
 regression suite, exact replay or live A/B was run for this follow-up.
 
-### Allow tearing comparison (2026-09-12)
+### Adaptive presentation permission (2026-09-15)
 
-The VRR settings expose `Allow tearing`, saved as `allowvrrtearing` and enabled
-by default. The session snapshots it before decoder creation, carries it through
-decoder recovery, and requires reconnect to change it. Latency preset, queue
-targets, smoothing and per-frame headroom decisions use the same controller
-parameters in both arms. This setting controls native presentation permission;
-it does not force every controller decision to be latched.
+Active VRR now owns its native presentation policy instead of exposing a
+separate `Allow tearing` preference. Loading preferences removes the retired
+`allowvrrtearing` key so an old profile cannot silently disable adaptive
+presentation. V-Sync remains the user-facing prerequisite for VRR; it does not
+remove the allow-tearing capability that DXGI VRR requires.
 
-On Windows DXGI, adaptive frames use `Present(0, ALLOW_TEARING)` when enabled
-and `Present(0, 0)` when disabled. Tight slots retain `Present(1, 0)` in both
-arms. The swapchain retains its tearing capability and is not recreated to
-change per-frame flags. Calibration identities separate the two permission
-arms because acquisition and native service can differ. The optional composition
-diagnostic presenter has no DXGI tearing flag, so this checkbox does not change
-its native ordering.
+On Windows DXGI, adaptive frames always use
+`Present(0, DXGI_PRESENT_ALLOW_TEARING)`. Tight or unsafe slots retain the
+controller's per-frame `Present(1, 0)` protection, so removing the preference
+does not remove synchronized late-frame handling. The swapchain still requires
+the allow-tearing capability. Existing enabled-policy calibration identities
+remain stable.
 
-On Linux Vulkan, disabling permission selects supported Mailbox once at session
-startup on qualified Wayland, X11/KMSDRM and Gamescope surfaces. If Mailbox is
-unavailable, it uses the existing fixed FIFO fallback. The swapchain's mode
-stays persistent during per-frame protection decisions. Ordinary Wayland already
-uses Mailbox with permission enabled, so the two arms may be identical there.
-Calibration identities include the selected mode. A Linux comparison can change
-the native mode and effective pacing fallback; it is not a DXGI-style per-call
-flag comparison.
+On Linux Vulkan, the renderer always selects the qualified adaptive mode for
+the surface: Mailbox on ordinary Wayland, Immediate on supported X11/KMSDRM or
+Gamescope, and the existing Gamescope Mailbox/FIFO compatibility choices.
+There is no longer a user-selected tear-free Mailbox/FIFO branch.
 
-Schema-5 rows append `session_allow_tearing`. Replay retains the captured arm
-and treats an absent historical field as enabled. Its native argument audit
-allows zero flags on unlatched DXGI frames only for explicit off captures, and
-rejects a permission change within one captured session. Timing and raster
-metrics remain proxies; replay cannot predict the driver's changed blocking
-behavior by flipping a permission bit on an existing capture. Compare fresh
-on/off gameplay captures for smoothness and visible tearing.
+Schema-5 retains `session_allow_tearing` for capture compatibility. New live
+sessions always record it as enabled. Replay still honors an explicit false
+value from an older capture, treats an absent historical field as enabled, and
+audits the native arguments of that recorded policy exactly.
 
 ### Retired oscillating latency test (removed 2026-09-11)
 
@@ -1562,7 +1553,6 @@ telemetry and `presentPreparedFrame()`, which forwards it to DXGI:
 
 - Latched: `Present(1, 0)`.
 - Adaptive: `Present(0, DXGI_PRESENT_ALLOW_TEARING)`.
-- Adaptive with Allow tearing disabled: `Present(0, 0)`.
 - Legacy: interval zero with the existing `legacyPresentFlags()` value.
 
 The controller can omit its software spacing floor for a latched decision;
@@ -1674,11 +1664,10 @@ Its implementations can have different acquisition and cancellation semantics.
 Do not transfer D3D11 fence or Present assumptions directly to Vulkan.
 
 On Linux the VRR request prefers the Vulkan frontend. The adaptive mode is
-selected for the surface at startup. With Allow tearing enabled: Mailbox on ordinary Wayland, Immediate
-on X11/KMSDRM, and Immediate on Gamescope. Gamescope additionally tries Mailbox
+selected for the surface at startup: Mailbox on ordinary Wayland, Immediate on
+X11/KMSDRM, and Immediate on Gamescope. Gamescope additionally tries Mailbox
 when the dormant SteamOS experiment is enabled, according to exposed surface
-capabilities. With Allow tearing disabled, all qualified surfaces prefer
-supported Mailbox; missing Mailbox selects fixed FIFO pacing instead.
+capabilities.
 
 After rendering a VRR frame, Linux Vulkan flushes the libplacebo queue and
 polls the acquired `pl_swapchain_frame.fbo` with `pl_tex_poll(..., 0)` until
@@ -1713,7 +1702,7 @@ reset, or fallback can recreate the swapchain and restores the cached
 colorspace/HDR hint before the next acquisition. Deterministic tests do not
 establish compositor or physical scanout behavior.
 
-With Allow tearing enabled, Gamescope WSI's FIFO compatibility exception is used when Immediate is unavailable
+Gamescope WSI's FIFO compatibility exception is used when Immediate is unavailable
 and the Mailbox experiment is disabled or Mailbox is unavailable. Although the WSI layer sends Mailbox to the underlying
 driver, it forwards the application's original present mode to Gamescope, which
 implements FIFO commit scheduling itself. Selecting Mailbox explicitly avoids
@@ -1818,8 +1807,9 @@ boundary exactly; readiness-to-submission is not an interchangeable latency metr
 
 Every row also records `session_latency_mode`, `session_readiness_hitch_feedback`,
 `calibration_loaded`, `initial_cached_samples`, and `history_version`. The final
-`session_allow_tearing` column records the snapshotted native permission;
-historical captures without it default to enabled. Worker
+`session_allow_tearing` column records the native permission. New sessions
+always record it as enabled; historical captures without it default to enabled,
+while replay retains an explicit false value from an older capture. Worker
 decision rows have `history_state_valid=1` and scalar snapshots of history samples,
 misses, duration, and release eligibility. These snapshots are taken at trace
 enqueue, after the outcome, rather than at the earlier scheduling decision.

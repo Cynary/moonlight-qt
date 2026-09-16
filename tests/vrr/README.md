@@ -64,8 +64,7 @@ unavailable coverage. This diagnostic does not change the controller or buffer.
 
 `tst_dxgipresent` tests the shared D3D11 native-call boundary with a fake
 swapchain, without Windows or Qt dependencies. It verifies synchronized
-`Present(1, 0)`, adaptive `Present(0, ALLOW_TEARING)`, the Allow tearing off arm's
-adaptive `Present(0, 0)`, mode transitions, legacy
+`Present(1, 0)`, adaptive `Present(0, ALLOW_TEARING)`, mode transitions, legacy
 interval-zero calls, telemetry parameter agreement, and result propagation.
 It does not replace a Windows renderer build or a live scanout test.
 
@@ -109,9 +108,6 @@ with the experiment enabled, or the prior WSI FIFO mode with it disabled.
 It also covers the FIFO-only WSI compatibility path, unsupported backends, and
 preservation of ordinary Wayland and X11/KMSDRM choices. The test cannot prove
 which mode an affected device exposes or whether Gamescope displays each frame.
-The Allow tearing off cases require supported Mailbox on every qualified
-surface, independent of the retired experiment, and fixed FIFO fallback when
-Mailbox is unavailable; unsupported surfaces remain ineligible.
 
 On Linux, `tst_plvkswapchain` covers the persistent present-mode classification:
 Mailbox provides latch protection through synchronized stale-image replacement,
@@ -125,8 +121,7 @@ Linux Vulkan keeps the startup-selected present mode for the lifetime of one
 persistent swapchain; per-frame latch decisions never destroy or recreate it.
 Persistent Mailbox counts as protected presentation and omits the redundant
 software spacing floor, while Immediate and FIFO retain that floor. The
-Gamescope WSI FIFO compatibility path retains its compositor-owned behavior,
-while disabling Allow tearing selects supported Mailbox at session startup.
+Gamescope WSI FIFO compatibility path retains its compositor-owned behavior.
 The latency presets cap adaptive padding independently of native mode: half a
 fitted source frame for Low Latency, one frame for Balanced Target, and three
 frames for Smooth in live sessions. Explicit historical replay parameters can
@@ -134,12 +129,12 @@ retain the configured stream-rate basis. Smooth is additionally allowed up to
 24 ms, subject to queue capacity. Stale-work replacement remains a separate
 two-frame rule.
 
-The Allow tearing checkbox defaults on and requires reconnect. The worker tests
-verify identical controller parameters in both arms, an unchanged initial latch
-decision, and the appended schema-5 `session_allow_tearing` field. Set
-`MOONLIGHT_VRR_TEST_EXPORT_NO_TEAR_TRACE` to export the off-arm fixture for
-`vrrreplay --require-exact-baseline`. Replay-config tests preserve the strict
-DXGI argument contract: unlatched flags zero require explicit off permission;
+New live VRR sessions always enable native adaptive-presentation permission and
+record the schema-5 `session_allow_tearing` field as true. Worker tests retain a
+test-only false fixture for historical exact replay. Set
+`MOONLIGHT_VRR_TEST_EXPORT_NO_TEAR_TRACE` to export that fixture for `vrrreplay
+--require-exact-baseline`. Replay-config tests preserve the strict DXGI argument
+contract for old captures: unlatched flags zero require explicit off permission;
 absent historical permission still requires `ALLOW_TEARING`. Native capability
 checks remain unchanged. A replay of one arm cannot model the other arm's
 driver blocking or establish optical tear freedom; that comparison needs fresh
