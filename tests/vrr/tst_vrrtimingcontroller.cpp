@@ -430,6 +430,7 @@ VrrTimingParameters offsetTestPolicy()
     policy.playoutOffsetWarmupSamples = 0;
     policy.playoutOffsetCadenceGate = 1;
     policy.playoutOffsetSlewUsPerSecond = 2400;
+    policy.playoutOffsetSourceClock = 1;
     policy.playoutOffsetMaximumStepUs = 100;
     return policy;
 }
@@ -446,7 +447,7 @@ void testOffsetSlewUsesElapsedTime()
                 constexpr uint64_t epochUs = 1000000;
                 controller.schedule(frame(1, 0, true, epochUs), epochUs);
                 int64_t previousOffset = controller.playoutOffsetUs();
-                uint64_t lastObservedUs = epochUs;
+                uint64_t lastSourceClockUs = 0;
                 // Keep a downward phase step shorter than one source interval
                 // so even the 240 FPS fixture has a monotonic observation clock.
                 const int64_t phaseUs = static_cast<int64_t>(
@@ -464,10 +465,11 @@ void testOffsetSlewUsesElapsedTime()
                     expect(decision.playoutDelayUs == 6000,
                            "offset correction must not acquire extra playout buffering");
                     previousOffset = offset;
-                    lastObservedUs = decodedUs;
+                    lastSourceClockUs =
+                        uint64_t(timestamp) * 1000000 / 90000;
                 }
                 const int64_t expectedUs = static_cast<int64_t>(
-                    (lastObservedUs - epochUs) * slewRate / 1000000);
+                    lastSourceClockUs * slewRate / 1000000);
                 expect(std::abs((controller.playoutOffsetUs() - int64_t(epochUs)) -
                                 direction * expectedUs) <= 1,
                        "equal elapsed time must buy equal correction across FPS, including fractional rates");
@@ -476,36 +478,40 @@ void testOffsetSlewUsesElapsedTime()
     }
 }
 
-void testOffsetSlewUsesObservationClockAndBoundsGaps()
+void testOffsetSlewIgnoresWorkerBacklogAndPreservesHistoricalClock()
 {
     auto policy = offsetTestPolicy();
     policy.playoutOffsetWindowUs = 1;
+    auto historicalPolicy = policy;
+    historicalPolicy.playoutOffsetSourceClock = 0;
     VrrTimingController controller(config(60, 120), true, policy);
+    VrrTimingController delayed(config(60, 120), true, policy);
+    VrrTimingController historical(config(60, 120), true, historicalPolicy);
     constexpr uint64_t epochUs = 1000000;
     controller.schedule(frame(1, 0, true, epochUs), epochUs);
-    // Readiness is a service boundary, not the wall clock: all of these
-    // observations occur well after the immutable decoder output.
+    delayed.schedule(frame(1, 0, true, epochUs), epochUs);
+    historical.schedule(frame(1, 0, true, epochUs), epochUs);
+    // A two-second worker/GPU stall must not age the source-clock mapping.
+    // Historical captures explicitly retain the worker-clock behavior.
     uint64_t nowUs = epochUs + 2000000;
     uint32_t timestamp = 1500;
     uint64_t decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
-    controller.schedule(frame(2, timestamp, true, decodedUs), nowUs);
-    expect(controller.playoutOffsetUs() == int64_t(epochUs + 100),
-           "a long observation gap must buy only one capped offset step");
+    controller.schedule(frame(2, timestamp, true, decodedUs), decodedUs);
+    delayed.schedule(frame(2, timestamp, true, decodedUs), nowUs);
+    historical.schedule(frame(2, timestamp, true, decodedUs), nowUs);
+    expect(delayed.playoutOffsetUs() == controller.playoutOffsetUs(),
+           "local GPU/worker backlog must not buy source-offset correction");
+    expect(historical.playoutOffsetUs() == int64_t(epochUs + 100),
+           "captured worker-clock policy must retain its bounded gap step");
     for (int i = 3; i <= 8; ++i) {
         timestamp += 1500;
         decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
         nowUs += 10000;
-        const int64_t before = controller.playoutOffsetUs();
-        controller.schedule(frame(i, timestamp, true, decodedUs), nowUs);
-        expect(controller.playoutOffsetUs() - before == 24,
-               "slew must follow observation time without banking the previous stall");
+        controller.schedule(frame(i, timestamp, true, decodedUs), decodedUs);
+        delayed.schedule(frame(i, timestamp, true, decodedUs), nowUs);
+        expect(delayed.playoutOffsetUs() == controller.playoutOffsetUs(),
+               "continued render contention must not perturb mapping age or slew");
     }
-    const int64_t beforeRollback = controller.playoutOffsetUs();
-    timestamp += 1500;
-    decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
-    controller.schedule(frame(9, timestamp, true, decodedUs), nowUs - 1);
-    expect(controller.playoutOffsetUs() == beforeRollback,
-           "a reversed observation clock must not move the mapping");
     controller.rebase();
     controller.schedule(frame(1, 0, true, epochUs), epochUs);
     expect(controller.playoutOffsetUs() == int64_t(epochUs),
@@ -4795,7 +4801,7 @@ int main()
     testSourcePlayoutDelayOffsetsProjectedTargets();
     testTimestampModePreservesUnevenHostIntervals();
     testOffsetSlewUsesElapsedTime();
-    testOffsetSlewUsesObservationClockAndBoundsGaps();
+    testOffsetSlewIgnoresWorkerBacklogAndPreservesHistoricalClock();
     testOffsetRecoveryRejectsTransitionMinimum();
     testOffsetRecoveryKeepsStartupPaddingAndNativePolicy();
     testTimestampModeStillBoundsCatchUpBursts();

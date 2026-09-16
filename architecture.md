@@ -70,14 +70,16 @@ selection. The separate permission comparison below can select Mailbox.
 Live Windows and Linux sessions now reject cadence-ineligible clock-offset
 observations. A source-phase discontinuity retires the old minimum-observation
 window while retaining the applied offset and the interval buffer. Subsequent
-eligible observations recover at 2400 us per second of monotonic decision time,
+eligible observations recover at 2400 us per second of monotonic sender time,
 with a 100 us per-observation cap. This retains the former 20 us/frame correction
 rate at 120 FPS without making 60 FPS converge twice as slowly. Fractional credit
 is retained, but rejected observations and capped stalls cannot bank future
 catch-up steps. A genuine epoch reset clears the clock and fractional state.
 
-The decode-readiness-minus-RTP value remains the observation; worker decision
-time only ages the window and sets the correction budget. A cadence break ends
+The decode-readiness-minus-RTP value remains the observation; unwrapped RTP
+time ages the window and sets the correction budget, so local decode, renderer,
+and GPU backlog cannot feed back into the source-clock mapping. Captures from
+the prior worker-clock implementation retain that behavior explicitly for exact replay. A cadence break ends
 startup's unrestricted downward warmup instead of restarting it. No presentation
 target is changed after preparation starts. The display-period startup clamp,
 queue capacity, preset delay caps and release rates are unchanged. This can move
@@ -85,9 +87,10 @@ a genuinely late source phase later; it is not a zero-latency cure for unfinishe
 work and does not establish optical tear freedom. Vulkan's persistent native
 modes and software safety floor remain unchanged.
 
-`playout_offset_cadence_gate=0` and `playout_offset_slew_us_per_second=0`
+`playout_offset_cadence_gate=0`, `playout_offset_slew_us_per_second=0`, and
+`playout_offset_source_clock=0`
 retain the historical observation and per-frame-slew path when absent from old
-captures. New sessions capture both switches and `playout_offset_maximum_step_us`.
+captures. New sessions capture all three switches and `playout_offset_maximum_step_us`.
 See [offset-recovery investigation](docs/vrr-offset-recovery.md) for the supplied
 trace evidence, implementation tradeoffs and pending validation. No build,
 regression suite, exact replay or live A/B was run for this follow-up.

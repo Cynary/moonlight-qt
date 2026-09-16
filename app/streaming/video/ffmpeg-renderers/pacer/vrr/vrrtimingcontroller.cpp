@@ -205,6 +205,10 @@ VrrTimingParameters vrrTimingParametersForSession(
     // mapper may now correct 40 us/frame instead of taking twice as long.
     // A per-observation cap prevents gaps from buying a large phase jump.
     parameters.playoutOffsetSlewUsPerSecond = 2400;
+    // Local GPU and worker backlog must not age the sender-clock model or buy
+    // a larger correction. The unwrapped RTP timeline supplies elapsed time;
+    // decode completion still supplies the readiness offset being corrected.
+    parameters.playoutOffsetSourceClock = 1;
     parameters.playoutOffsetMaximumStepUs = 100;
     parameters.playoutDelayAdaptive = 1;
     parameters.sourcePlayoutDelayUs = kFixedPlayoutDelayUs;
@@ -535,9 +539,13 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     if (timestampPlayout) {
         const int64_t offsetUs = signedDifference(frame.decodeCompleteUs(),
                                                   rtpUs);
+        const bool timeBasedOffset =
+            m_Parameters.playoutOffsetSlewUsPerSecond != 0;
+        const uint64_t offsetClockUs = timeBasedOffset ?
+            (m_Parameters.playoutOffsetSourceClock != 0 ? rtpUs : nowUs) :
+            frame.decodeCompleteUs();
         const int64_t appliedOffsetUs = observePlayoutOffset(
-            m_Parameters.playoutOffsetSlewUsPerSecond != 0 ?
-                nowUs : frame.decodeCompleteUs(),
+            offsetClockUs,
             offsetUs, rebased || cadence.eligible, cadence.phaseDiscontinuity);
         anchorSourceTime(addSigned(rtpUs, appliedOffsetUs));
         readyOffsetUs = signedDifference(frame.decodeCompleteUs(),
@@ -705,9 +713,13 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
             // clock predicts: the sender clock jumped. Re-seed the offset on
             // this frame rather than making it wait out a stale mapping.
             resetPlayoutOffsets();
+            const bool timeBasedOffset =
+                m_Parameters.playoutOffsetSlewUsPerSecond != 0;
+            const uint64_t offsetClockUs = timeBasedOffset ?
+                (m_Parameters.playoutOffsetSourceClock != 0 ? rtpUs : nowUs) :
+                frame.decodeCompleteUs();
             observePlayoutOffset(
-                m_Parameters.playoutOffsetSlewUsPerSecond != 0 ?
-                    nowUs : frame.decodeCompleteUs(),
+                offsetClockUs,
                 signedDifference(frame.decodeCompleteUs(), rtpUs));
         }
         readyOffsetUs = 0;

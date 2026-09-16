@@ -1034,11 +1034,14 @@ captures and for explicit experiments.
 
 New live sessions enable `playout_offset_cadence_gate=1` and
 `playout_offset_slew_us_per_second=2400`, capped by
-`playout_offset_maximum_step_us=100`. Cadence breaks retire the observation
+`playout_offset_maximum_step_us=100`, with
+`playout_offset_source_clock=1`. Cadence breaks retire the observation
 window without reseeding either the applied mapping or the interval buffer.
-Ineligible samples cannot train the new floor. The worker's monotonic decision
-time controls aging and slew; the value being mapped is still readiness minus
-RTP. Zero-valued gate/rate defaults preserve historical exact replay. The
+Ineligible samples cannot train the new floor. Monotonic unwrapped RTP time
+controls aging and slew, preventing local decode/renderer/GPU backlog from steering the
+source mapping; the value being mapped is still readiness minus RTP. A zero
+decode-clock switch preserves exact replay of the initial worker-clock captures,
+and zero-valued gate/rate defaults preserve older exact replay. The
 per-frame `playout_offset_slew_us` setting is used only with the new rate at zero.
 
 The added controller fixtures cover both slew directions at 30/60/120/240 FPS,

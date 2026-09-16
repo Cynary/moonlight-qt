@@ -419,6 +419,9 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
     if (value.playoutOffsetCadenceGate > 1) {
         return fail("playout_offset_cadence_gate must be 0 or 1");
     }
+    if (value.playoutOffsetSourceClock > 1) {
+        return fail("playout_offset_source_clock must be 0 or 1");
+    }
     if (value.playoutOffsetSlewUsPerSecond > 1000000 ||
         value.playoutOffsetMaximumStepUs == 0 ||
         value.playoutOffsetMaximumStepUs > 1000000) {

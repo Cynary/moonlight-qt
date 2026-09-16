@@ -50,7 +50,7 @@ alone injects padding; neither the adaptive delay nor the interval buffer is
 reseeded. A genuine timeline rebase still initializes a new epoch normally.
 
 `playout_offset_slew_us_per_second=2400` normalizes steady-state correction to
-elapsed worker decision time. Nominal limits are 80 us/frame at 30 FPS,
+elapsed sender/RTP time. Nominal limits are 80 us/frame at 30 FPS,
 40 us/frame at 60 FPS, and 20 us/frame at 120 FPS. The independent
 `playout_offset_maximum_step_us=100` bounds any one update, including a long
 idle interval. Fractional microseconds are retained to avoid truncation at high
@@ -58,10 +58,12 @@ FPS. No whole-step debt is banked after a cap. Ineligible observations discard
 fractional credit; clock rollback conservatively clears observations without
 moving the mapping, and rebase clears all clock/credit state.
 
-Using worker decision time for aging does not replace the readiness observation
-with queue residence. The value remains `decodeCompleteUs - rtpUs`; only the
-observation clock changes. The prior synthetic readiness timestamp can move
-independently of elapsed time as measured decode blocking changes.
+`playout_offset_source_clock=1` derives both aging and slew credit from the
+unwrapped RTP timeline. The value remains `decodeCompleteUs - rtpUs`, so actual
+readiness movement is still observed, but local decode, renderer, and GPU stalls
+cannot buy a larger mapping correction. Captures made with the initial elapsed-
+slew implementation retain `playout_offset_source_clock=0` and replay their
+worker-decision clock exactly.
 
 The display-period startup clamp is unchanged. So are preset caps, buffer
 release/hold rates, the three-waiting-plus-one-active capacity, GPU readiness
