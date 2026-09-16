@@ -9769,10 +9769,11 @@ int main(int argc, char* argv[])
                 // evidence for this backend.
                 nativeOutcomeRelationshipValid =
                     nativeOutcomeRelationshipValid &&
-                    (presented == submissionIdValid) &&
+                    (!submissionIdValid || presented) &&
                     (!latchSampleValid ||
-                     optionalUnsignedField(
-                         fields, traceHeader.indexOf("latch_time_kind")) == 2) &&
+                     (submissionIdValid &&
+                      optionalUnsignedField(
+                          fields, traceHeader.indexOf("latch_time_kind")) == 2)) &&
                     !submissionIdQueryResultDeclared &&
                     !frameStatsQueryResultDeclared &&
                     !rawSyncQpcDeclared &&
