@@ -12,6 +12,7 @@ class VrrReplayConfigTest : public QObject
 
 private slots:
     void defaultsRoundTrip();
+    void offsetRecoveryPolicyRoundTrip();
     void nativeHitchPolicyRoundTrip();
     void displayEventPolicyRoundTrip();
     void submissionEstimatePolicyRoundTrip();
@@ -181,6 +182,46 @@ void VrrReplayConfigTest::defaultsRoundTrip()
         "execution.periodic_submission_advance_us"));
     QVERIFY(vrrReplayParameterNames().contains(
         "execution.periodic_spacing_guard_feedback_us"));
+}
+
+void VrrReplayConfigTest::offsetRecoveryPolicyRoundTrip()
+{
+    VrrSessionConfig session;
+    session.streamRateHz = 60;
+    session.displayRefreshHz = 120;
+    const auto live = vrrTimingParametersForSession(session);
+    const QJsonObject snapshot = vrrTimingParametersToJson(live);
+    VrrTimingParameters restored;
+    QString error;
+    QVERIFY2(applyVrrReplayControllerSnapshot(snapshot, restored, error), qPrintable(error));
+    QCOMPARE(restored.playoutOffsetCadenceGate, uint64_t(1));
+    QCOMPARE(restored.playoutOffsetSlewUsPerSecond, uint64_t(2400));
+    QCOMPARE(restored.playoutOffsetMaximumStepUs, uint64_t(100));
+    QVERIFY(vrrReplayParameterNames().contains("controller.playout_offset_cadence_gate"));
+    QVERIFY(vrrReplayParameterNames().contains("controller.playout_offset_slew_us_per_second"));
+    QVERIFY(vrrReplayParameterNames().contains("controller.playout_offset_maximum_step_us"));
+
+    QJsonObject oldSnapshot = snapshot;
+    oldSnapshot.remove("playout_offset_cadence_gate");
+    oldSnapshot.remove("playout_offset_slew_us_per_second");
+    oldSnapshot.remove("playout_offset_maximum_step_us");
+    VrrTimingParameters historical;
+    QVERIFY2(applyVrrReplayControllerSnapshot(oldSnapshot, historical, error), qPrintable(error));
+    QCOMPARE(historical.playoutOffsetCadenceGate, uint64_t(0));
+    QCOMPARE(historical.playoutOffsetSlewUsPerSecond, uint64_t(0));
+    QCOMPARE(historical.playoutOffsetSlewUs, uint64_t(20));
+
+    auto invalid = restored;
+    invalid.playoutOffsetCadenceGate = 2;
+    QVERIFY(!validateVrrTimingParameters(invalid, error));
+    invalid = restored;
+    invalid.playoutOffsetSlewUsPerSecond = 1000001;
+    QVERIFY(!validateVrrTimingParameters(invalid, error));
+    invalid = restored;
+    invalid.playoutOffsetMaximumStepUs = 0;
+    QVERIFY(!validateVrrTimingParameters(invalid, error));
+    invalid.playoutOffsetMaximumStepUs = 1000001;
+    QVERIFY(!validateVrrTimingParameters(invalid, error));
 }
 
 void VrrReplayConfigTest::inheritanceAndOverride()

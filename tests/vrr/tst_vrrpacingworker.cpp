@@ -1566,12 +1566,16 @@ void testSmoothnessTraceCapturesReadinessPolicy()
         columns.indexOf("param_retain_readiness_on_phase_reset");
     const int adaptiveColumn =
         columns.indexOf("param_playout_delay_adaptive");
+    const int offsetGateColumn = columns.indexOf("param_playout_offset_cadence_gate");
+    const int offsetRateColumn = columns.indexOf("param_playout_offset_slew_us_per_second");
+    const int offsetStepColumn = columns.indexOf("param_playout_offset_maximum_step_us");
     const int playoutDelayColumn = columns.indexOf("playout_delay_us");
     expect(dispositionColumn >= 0 && additionalQueueColumn >= 0 &&
                lowPercentileColumn >= 0 && loosePercentileColumn >= 0 &&
                sourceDelayColumn >= 0 && timestampPlayoutColumn >= 0 &&
                retainReserveColumn >= 0 && adaptiveColumn >= 0 &&
-               playoutDelayColumn >= 0,
+               playoutDelayColumn >= 0 && offsetGateColumn >= 0 &&
+               offsetRateColumn >= 0 && offsetStepColumn >= 0,
            "smoothness trace must expose its resolved playout policy and the applied delay");
 
     bool foundPresentedRow = false;
@@ -1591,6 +1595,9 @@ void testSmoothnessTraceCapturesReadinessPolicy()
                    fields.value(timestampPlayoutColumn) == "1" &&
                    fields.value(adaptiveColumn) == "1" &&
                    fields.value(retainReserveColumn) == "0" &&
+                   fields.value(offsetGateColumn) == "1" &&
+                   fields.value(offsetRateColumn) == "2400" &&
+                   fields.value(offsetStepColumn) == "100" &&
                    fields.value(playoutDelayColumn).toULongLong() >= 1000,
                 "the session must record the single adaptive timestamp playout policy");
     }

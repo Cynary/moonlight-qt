@@ -12,7 +12,8 @@ vrr14-style compact stats reporting, restored Reduce judder, reconnect
 trace preservation, motion cadence telemetry, hard buffer ceiling, AMD low-latency decode request, observed-latency trace diagnostics, and removal of the latency oscillation test,
 inspected 2026-09-15; now includes responsive readiness revision 4, desktop-rate isolation,
 fence-value-verified Windows readiness waits, bounded Vulkan texture-completion
-polling, and bounded GPU-readiness head-start adaptation. The latency
+polling, bounded GPU-readiness head-start adaptation, and cadence-gated,
+elapsed-time source-offset recovery. The latency
 presets and persistent Vulkan presentation changes remain active.
 Windows and Linux share one production queue policy: mean absolute client-added
 interval error over one second with a profile-selected tolerance (0.5 ms for Low
@@ -63,6 +64,33 @@ composition guard and passes repaint=false to the decoder. Dormant renderer
 helpers and their deterministic tests remain available for development.
 With Allow tearing enabled, production retains its original Immediate/WSI FIFO
 selection. The separate permission comparison below can select Mailbox.
+
+### Source-offset transition recovery (2026-09-15)
+
+Live Windows and Linux sessions now reject cadence-ineligible clock-offset
+observations. A source-phase discontinuity retires the old minimum-observation
+window while retaining the applied offset and the interval buffer. Subsequent
+eligible observations recover at 2400 us per second of monotonic decision time,
+with a 100 us per-observation cap. This retains the former 20 us/frame correction
+rate at 120 FPS without making 60 FPS converge twice as slowly. Fractional credit
+is retained, but rejected observations and capped stalls cannot bank future
+catch-up steps. A genuine epoch reset clears the clock and fractional state.
+
+The decode-readiness-minus-RTP value remains the observation; worker decision
+time only ages the window and sets the correction budget. A cadence break ends
+startup's unrestricted downward warmup instead of restarting it. No presentation
+target is changed after preparation starts. The display-period startup clamp,
+queue capacity, preset delay caps and release rates are unchanged. This can move
+a genuinely late source phase later; it is not a zero-latency cure for unfinished
+work and does not establish optical tear freedom. Vulkan's persistent native
+modes and software safety floor remain unchanged.
+
+`playout_offset_cadence_gate=0` and `playout_offset_slew_us_per_second=0`
+retain the historical observation and per-frame-slew path when absent from old
+captures. New sessions capture both switches and `playout_offset_maximum_step_us`.
+See [offset-recovery investigation](docs/vrr-offset-recovery.md) for the supplied
+trace evidence, implementation tradeoffs and pending validation. No build,
+regression suite, exact replay or live A/B was run for this follow-up.
 
 ### Allow tearing comparison (2026-09-12)
 
@@ -1050,9 +1078,14 @@ offset observation = decodeCompleteUs - unwrappedRtpInMicroseconds
 ```
 
 `observePlayoutOffset()` tracks a windowed minimum of these observations, with
-warmup and bounded slewing. The inherited offset window is 3 seconds, warmup is
-64 samples, and slew input is 20 us. This tracks relative clock drift without
-following every arrival/decode spike. The minimum is an empirical client mapping,
+warmup and bounded slewing. The inherited offset window is 3 seconds and epoch
+warmup is 64 samples. Historical captures use all observations and 20 us per
+frame. Live sessions retire the observation window on phase discontinuities,
+exclude ineligible samples, and preserve the applied offset rather than
+re-anchoring it. They use 2400 us per second of worker decision time, capped at
+100 us per observation; the readiness value itself is unchanged. This prevents
+an old phase minimum from steering the new phase and avoids FPS-dependent
+steady-state convergence. The minimum remains an empirical client mapping,
 not measured host capture latency or absolute host/client synchronization.
 
 Timestamp mode zeroes the separate legacy readiness reserve/phase demand:

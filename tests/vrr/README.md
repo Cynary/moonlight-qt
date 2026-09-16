@@ -1032,6 +1032,32 @@ customized and does not inherit the session policy: a sweep must set
 The adaptive readiness parameters remain available for replaying older
 captures and for explicit experiments.
 
+New live sessions enable `playout_offset_cadence_gate=1` and
+`playout_offset_slew_us_per_second=2400`, capped by
+`playout_offset_maximum_step_us=100`. Cadence breaks retire the observation
+window without reseeding either the applied mapping or the interval buffer.
+Ineligible samples cannot train the new floor. The worker's monotonic decision
+time controls aging and slew; the value being mapped is still readiness minus
+RTP. Zero-valued gate/rate defaults preserve historical exact replay. The
+per-frame `playout_offset_slew_us` setting is used only with the new rate at zero.
+
+The added controller fixtures cover both slew directions at 30/60/120/240 FPS,
+fractional correction, gap/clock-reset behavior, a poisoned transition minimum,
+and unchanged steady targets/padding across all presets. Latch-capable and
+non-latch-capable fixtures cover the shared policies used by DXGI/Vulkan Mailbox
+and Vulkan Immediate/FIFO respectively; they do not emulate a compositor or GPU.
+The worker capture fixture checks the new serialized parameters, and replay
+config tests cover round trips, legacy absence and invalid values. These new
+fixtures have not been executed in the Patchwork sandbox.
+
+`configs/offset-recovery-60-on-120.json` pins the supplied September 15 trace's
+captured controller settings, with separate gate-only, elapsed-only and combined
+scenarios. It intentionally leaves GPU-readiness adaptation at the capture's
+old setting so this comparison isolates the mapper. It does not inherit today's
+production session settings. Run an exact baseline first; see
+[the investigation note](../../docs/vrr-offset-recovery.md) for the required
+current-policy and native Linux follow-up. No candidate results are claimed.
+
 The replay is intentionally a fixed-recorded-admission model: it preserves the
 session's actual queue admission/drop and presentation lifecycle while using
 the real arrival timestamps and exogenous renderer costs. One lifecycle instant

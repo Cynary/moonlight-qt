@@ -416,6 +416,14 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
     if (value.playoutOffsetWindowUs == 0) {
         return fail("playout_offset_window_us must be non-zero");
     }
+    if (value.playoutOffsetCadenceGate > 1) {
+        return fail("playout_offset_cadence_gate must be 0 or 1");
+    }
+    if (value.playoutOffsetSlewUsPerSecond > 1000000 ||
+        value.playoutOffsetMaximumStepUs == 0 ||
+        value.playoutOffsetMaximumStepUs > 1000000) {
+        return fail("offset slew rate must be in 0..1000000 and maximum step in 1..1000000");
+    }
     if (value.playoutDelayAdaptive > 1) {
         return fail("playout_delay_adaptive must be 0 or 1");
     }

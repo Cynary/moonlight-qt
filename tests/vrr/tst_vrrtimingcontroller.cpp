@@ -37,6 +37,8 @@ VrrSessionConfig config(int streamRateHz = 60, int displayRefreshHz = 120)
 VrrTimingParameters legacyPlayoutParameters(const VrrSessionConfig& session)
 {
     auto policy = vrrTimingParametersForSession(session);
+    policy.playoutOffsetCadenceGate = 0;
+    policy.playoutOffsetSlewUsPerSecond = 0;
     policy.playoutResponsiveBuffer = 0;
     policy.playoutDelayCapSourcePeriodPerMille = 0;
     policy.playoutPredictionOnly = 0;
@@ -64,6 +66,8 @@ VrrTimingParameters legacyPlayoutParameters(const VrrSessionConfig& session)
 VrrTimingParameters legacyFeedbackParameters(const VrrSessionConfig& session)
 {
     auto policy = vrrTimingParametersForSession(session);
+    policy.playoutOffsetCadenceGate = 0;
+    policy.playoutOffsetSlewUsPerSecond = 0;
     policy.playoutResponsiveBuffer = 0;
     policy.playoutDelayCapSourcePeriodPerMille = 0;
     policy.playoutDelayMaximumPeriodPerMille = 0;
@@ -414,6 +418,186 @@ void testTimestampModePreservesUnevenHostIntervals()
            "the mapping offset must follow sustained drift");
     expect(maximumSpacingErrorUs <= policy.playoutOffsetSlewUs,
            "drift tracking must never move a target by more than the slew per frame");
+}
+
+// Isolate the mapper from adaptive delay, render training and smoothing. The
+// public schedule path still exercises RTP conversion and cadence eligibility.
+VrrTimingParameters offsetTestPolicy()
+{
+    VrrTimingParameters policy;
+    policy.timestampPlayoutEnabled = 1;
+    policy.sourcePlayoutDelayUs = 6000;
+    policy.playoutOffsetWarmupSamples = 0;
+    policy.playoutOffsetCadenceGate = 1;
+    policy.playoutOffsetSlewUsPerSecond = 2400;
+    policy.playoutOffsetMaximumStepUs = 100;
+    return policy;
+}
+
+void testOffsetSlewUsesElapsedTime()
+{
+    for (int rateHz : {30, 60, 120, 240}) {
+        for (int direction : {-1, 1}) {
+            for (uint64_t slewRate : {uint64_t(7), uint64_t(2400)}) {
+                auto policy = offsetTestPolicy();
+                policy.playoutOffsetWindowUs = 1;
+                policy.playoutOffsetSlewUsPerSecond = slewRate;
+                VrrTimingController controller(config(rateHz, 240), true, policy);
+                constexpr uint64_t epochUs = 1000000;
+                controller.schedule(frame(1, 0, true, epochUs), epochUs);
+                int64_t previousOffset = controller.playoutOffsetUs();
+                uint64_t lastObservedUs = epochUs;
+                // Keep a downward phase step shorter than one source interval
+                // so even the 240 FPS fixture has a monotonic observation clock.
+                const int64_t phaseUs = static_cast<int64_t>(
+                    std::min<uint64_t>(6000, 750000 / uint64_t(rateHz)));
+                for (int i = 1; i <= rateHz; ++i) {
+                    const auto timestamp = static_cast<uint32_t>(
+                        uint64_t(i) * 90000 / uint64_t(rateHz));
+                    const uint64_t decodedUs = static_cast<uint64_t>(
+                        int64_t(decodedTimeForRtp(epochUs, timestamp)) + direction * phaseUs);
+                    const auto decision = controller.schedule(
+                        frame(i + 1, timestamp, true, decodedUs), decodedUs);
+                    const int64_t offset = controller.playoutOffsetUs();
+                    expect(std::abs(offset - previousOffset) <= 100,
+                           "elapsed-time offset slew must respect its per-observation cap");
+                    expect(decision.playoutDelayUs == 6000,
+                           "offset correction must not acquire extra playout buffering");
+                    previousOffset = offset;
+                    lastObservedUs = decodedUs;
+                }
+                const int64_t expectedUs = static_cast<int64_t>(
+                    (lastObservedUs - epochUs) * slewRate / 1000000);
+                expect(std::abs((controller.playoutOffsetUs() - int64_t(epochUs)) -
+                                direction * expectedUs) <= 1,
+                       "equal elapsed time must buy equal correction across FPS, including fractional rates");
+            }
+        }
+    }
+}
+
+void testOffsetSlewUsesObservationClockAndBoundsGaps()
+{
+    auto policy = offsetTestPolicy();
+    policy.playoutOffsetWindowUs = 1;
+    VrrTimingController controller(config(60, 120), true, policy);
+    constexpr uint64_t epochUs = 1000000;
+    controller.schedule(frame(1, 0, true, epochUs), epochUs);
+    // Readiness is a service boundary, not the wall clock: all of these
+    // observations occur well after the immutable decoder output.
+    uint64_t nowUs = epochUs + 2000000;
+    uint32_t timestamp = 1500;
+    uint64_t decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
+    controller.schedule(frame(2, timestamp, true, decodedUs), nowUs);
+    expect(controller.playoutOffsetUs() == int64_t(epochUs + 100),
+           "a long observation gap must buy only one capped offset step");
+    for (int i = 3; i <= 8; ++i) {
+        timestamp += 1500;
+        decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
+        nowUs += 10000;
+        const int64_t before = controller.playoutOffsetUs();
+        controller.schedule(frame(i, timestamp, true, decodedUs), nowUs);
+        expect(controller.playoutOffsetUs() - before == 24,
+               "slew must follow observation time without banking the previous stall");
+    }
+    const int64_t beforeRollback = controller.playoutOffsetUs();
+    timestamp += 1500;
+    decodedUs = decodedTimeForRtp(epochUs, timestamp) + 6000;
+    controller.schedule(frame(9, timestamp, true, decodedUs), nowUs - 1);
+    expect(controller.playoutOffsetUs() == beforeRollback,
+           "a reversed observation clock must not move the mapping");
+    controller.rebase();
+    controller.schedule(frame(1, 0, true, epochUs), epochUs);
+    expect(controller.playoutOffsetUs() == int64_t(epochUs),
+           "a genuine epoch rebase must discard old offset state and credit");
+}
+
+void testOffsetRecoveryRejectsTransitionMinimum()
+{
+    // A source discontinuity can contain an unusually early readiness
+    // observation. It must not pull every later target earlier for three
+    // seconds, particularly when the following source phase is later.
+    for (bool canLatch : {false, true}) {
+        auto policy = offsetTestPolicy();
+        auto historical = policy;
+        historical.playoutOffsetCadenceGate = 0;
+        historical.playoutOffsetSlewUsPerSecond = 0;
+        VrrTimingController recovered(config(60, 120), canLatch, policy);
+        VrrTimingController legacy(config(60, 120), canLatch, historical);
+        constexpr uint64_t epochUs = 1000000;
+        uint32_t timestamp = 0;
+        int number = 0;
+        for (int i = 0; i < 180; ++i) {
+            timestamp = static_cast<uint32_t>(i * 1500);
+            const uint64_t decodedUs = decodedTimeForRtp(epochUs, timestamp);
+            recovered.schedule(frame(++number, timestamp, true, decodedUs), decodedUs);
+            legacy.schedule(frame(number, timestamp, true, decodedUs), decodedUs);
+        }
+        timestamp += 6000; // 66.7 ms source gap, below the full-rebase bound.
+        const uint64_t earlyUs = decodedTimeForRtp(epochUs, timestamp) - 6000;
+        const auto transition = recovered.schedule(
+            frame(++number, timestamp, true, earlyUs), earlyUs);
+        legacy.schedule(frame(number, timestamp, true, earlyUs), earlyUs);
+        expect(transition.phaseDiscontinuity && !transition.cadenceEligible && !transition.rebased,
+               "the regression fixture must exercise an ineligible phase change, not a full rebase");
+        expect(recovered.playoutOffsetUs() == int64_t(epochUs),
+               "an ineligible transition minimum must not move the applied offset");
+        for (int i = 0; i < 60; ++i) {
+            timestamp += 1500;
+            const uint64_t decodedUs = decodedTimeForRtp(epochUs, timestamp) + 4000;
+            const int64_t before = recovered.playoutOffsetUs();
+            const auto decision = recovered.schedule(
+                frame(++number, timestamp, true, decodedUs), decodedUs);
+            legacy.schedule(frame(number, timestamp, true, decodedUs), decodedUs);
+            const int64_t after = recovered.playoutOffsetUs();
+            expect(after >= before && after - before <= 100,
+                   "post-transition offset recovery must be gradual and use the new phase");
+            expect(decision.playoutDelayUs == 6000,
+                   "transition recovery must not reseed the retained delay");
+        }
+        expect(recovered.playoutOffsetUs() >= int64_t(epochUs + 2000),
+               "fresh stable cadence must recover without waiting for an old minimum to expire");
+        expect(legacy.playoutOffsetUs() < int64_t(epochUs - 1000),
+               "the historical policy must still reproduce the stale-minimum regression");
+    }
+}
+
+void testOffsetRecoveryKeepsStartupPaddingAndNativePolicy()
+{
+    // canLatch=true covers DXGI and persistent Vulkan Mailbox. false covers
+    // persistent Vulkan Immediate/FIFO: retain their software safety floor.
+    for (bool canLatch : {false, true}) {
+        for (int mode : {0, 1, 2}) {
+            for (int rateHz : {30, 60, 116, 120}) {
+                auto session = config(rateHz, 120);
+                session.latencyMode = mode;
+                auto policy = vrrTimingParametersForSession(session);
+                auto historical = policy;
+                historical.playoutOffsetCadenceGate = 0;
+                historical.playoutOffsetSlewUsPerSecond = 0;
+                VrrTimingController current(session, canLatch, policy);
+                VrrTimingController previous(session, canLatch, historical);
+                expect(policy.playoutOffsetCadenceGate == 1 &&
+                           policy.playoutOffsetSlewUsPerSecond == 2400 &&
+                           policy.playoutOffsetMaximumStepUs == 100,
+                       "all live presets must select the same bounded mapping policy");
+                for (int i = 0; i < 240; ++i) {
+                    const auto timestamp = static_cast<uint32_t>(
+                        uint64_t(i) * 90000 / uint64_t(rateHz));
+                    const uint64_t decodedUs = decodedTimeForRtp(1000000, timestamp);
+                    const auto a = current.schedule(frame(i + 1, timestamp, true, decodedUs), decodedUs);
+                    const auto b = previous.schedule(frame(i + 1, timestamp, true, decodedUs), decodedUs);
+                    expect(a.playoutDelayUs == b.playoutDelayUs && a.targetUs == b.targetUs &&
+                               a.latchedPresentation == b.latchedPresentation,
+                           "steady startup padding and native protection must not change at any source rate");
+                    current.noteSubmission(true, false, a.targetUs);
+                    previous.noteSubmission(true, false, b.targetUs);
+                    expect(current.earliestSubmissionUs() == previous.earliestSubmissionUs(),
+                           "Linux's unprotected-present safety floor must remain intact");
+                }
+            }
+        }
+    }
 }
 
 void testTimestampModeStillBoundsCatchUpBursts()
@@ -4610,6 +4794,10 @@ int main()
     testTimingFormulaeAndReserveCap();
     testSourcePlayoutDelayOffsetsProjectedTargets();
     testTimestampModePreservesUnevenHostIntervals();
+    testOffsetSlewUsesElapsedTime();
+    testOffsetSlewUsesObservationClockAndBoundsGaps();
+    testOffsetRecoveryRejectsTransitionMinimum();
+    testOffsetRecoveryKeepsStartupPaddingAndNativePolicy();
     testTimestampModeStillBoundsCatchUpBursts();
     testCadenceSmoothingEvensJitteredSource();
     testAdaptivePlayoutDelaySlewsAcrossBands();

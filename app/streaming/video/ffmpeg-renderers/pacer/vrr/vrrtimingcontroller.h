@@ -68,6 +68,10 @@
     X(uint64_t, timestamp_playout_enabled, timestampPlayoutEnabled, 0) \
     X(uint64_t, playout_offset_window_us, playoutOffsetWindowUs, 3000000) \
     X(uint64_t, playout_offset_slew_us, playoutOffsetSlewUs, 20) \
+    /* Zero defaults retain the per-frame, unfiltered historical mapping. */ \
+    X(uint64_t, playout_offset_cadence_gate, playoutOffsetCadenceGate, 0) \
+    X(uint64_t, playout_offset_slew_us_per_second, playoutOffsetSlewUsPerSecond, 0) \
+    X(uint64_t, playout_offset_maximum_step_us, playoutOffsetMaximumStepUs, 100) \
     X(size_t, playout_offset_warmup_samples, playoutOffsetWarmupSamples, 64) \
     X(uint64_t, playout_delay_adaptive, playoutDelayAdaptive, 0) \
     X(uint64_t, playout_delay_start_us, playoutDelayStartUs, 0) \
@@ -388,7 +392,7 @@ private:
     };
 
     struct PlayoutOffsetSample {
-        uint64_t decodeCompleteUs = 0;
+        uint64_t observationUs = 0;
         int64_t offsetUs = 0;
     };
 
@@ -404,8 +408,9 @@ private:
 
     bool timestampPlayoutEnabled() const;
     void resetPlayoutOffsets();
-    int64_t observePlayoutOffset(uint64_t decodeCompleteUs,
-                                 int64_t offsetUs);
+    int64_t observePlayoutOffset(uint64_t observationUs, int64_t offsetUs,
+                                 bool cadenceEligible = true,
+                                 bool phaseDiscontinuity = false);
     static uint64_t rtpTicksToUs(uint64_t ticks);
     void updatePlayoutDelay(const PacedFrame& frame,
                             const CadenceObservation& cadence,
@@ -538,6 +543,9 @@ private:
     bool m_PlayoutOffsetValid = false;
     int64_t m_AppliedPlayoutOffsetUs = 0;
     uint64_t m_PlayoutSamplesSeen = 0;
+    bool m_PlayoutOffsetClockValid = false;
+    uint64_t m_LastPlayoutOffsetObservationUs = 0;
+    uint64_t m_PlayoutOffsetSlewRemainder = 0;
     bool m_TimestampPlayoutActive = false;
     std::map<unsigned int, PlayoutBand> m_PlayoutBands;
     Vrr13::Reserve m_PlayoutHistory;

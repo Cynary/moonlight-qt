@@ -197,6 +197,15 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.playoutRateProtectionEnabled = 0;
     parameters.playoutHistoryEnabled = 1;
     parameters.timestampPlayoutEnabled = 1;
+    // Do not let an ineligible desktop/cadence transition poison the next
+    // game's clock floor. Keep the applied phase and recover gradually from
+    // fresh cadence evidence, without reseeding the retained playout buffer.
+    parameters.playoutOffsetCadenceGate = 1;
+    // Match the former 20 us/frame at 120 FPS in elapsed time. At 60 FPS the
+    // mapper may now correct 40 us/frame instead of taking twice as long.
+    // A per-observation cap prevents gaps from buying a large phase jump.
+    parameters.playoutOffsetSlewUsPerSecond = 2400;
+    parameters.playoutOffsetMaximumStepUs = 100;
     parameters.playoutDelayAdaptive = 1;
     parameters.sourcePlayoutDelayUs = kFixedPlayoutDelayUs;
     parameters.playoutDelayStartUs = kPlayoutStartUs;
@@ -506,9 +515,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
 
     // Timestamp playout: the target is the sender timestamp mapped into the
     // local clock plus one constant delay. The mapping offset is the windowed
-    // minimum of decode-complete minus RTP time, slewed a few microseconds per
-    // frame so host/client clock drift is tracked without ever moving one
-    // frame's target relative to its neighbours. Nothing below re-anchors on
+    // minimum of decode-complete minus RTP time. Live sessions age samples
+    // and bound correction by elapsed observation time, independent of FPS;
+    // historical captures retain per-frame slewing. Steady-state corrections
+    // only move adjacent targets by the bounded step. Nothing below re-anchors on
     // a late or early frame: a late frame simply clamps to "now" and the next
     // frame returns to its own slot.
     const bool timestampPlayout = timestampPlayoutEnabled() &&
@@ -526,7 +536,9 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
         const int64_t offsetUs = signedDifference(frame.decodeCompleteUs(),
                                                   rtpUs);
         const int64_t appliedOffsetUs = observePlayoutOffset(
-            frame.decodeCompleteUs(), offsetUs);
+            m_Parameters.playoutOffsetSlewUsPerSecond != 0 ?
+                nowUs : frame.decodeCompleteUs(),
+            offsetUs, rebased || cadence.eligible, cadence.phaseDiscontinuity);
         anchorSourceTime(addSigned(rtpUs, appliedOffsetUs));
         readyOffsetUs = signedDifference(frame.decodeCompleteUs(),
                                          m_SourceTimeUs);
@@ -694,7 +706,8 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
             // this frame rather than making it wait out a stale mapping.
             resetPlayoutOffsets();
             observePlayoutOffset(
-                frame.decodeCompleteUs(),
+                m_Parameters.playoutOffsetSlewUsPerSecond != 0 ?
+                    nowUs : frame.decodeCompleteUs(),
                 signedDifference(frame.decodeCompleteUs(), rtpUs));
         }
         readyOffsetUs = 0;
@@ -2230,23 +2243,80 @@ void VrrTimingController::resetPlayoutOffsets()
     m_PlayoutOffsetValid = false;
     m_AppliedPlayoutOffsetUs = 0;
     m_PlayoutSamplesSeen = 0;
+    m_PlayoutOffsetClockValid = false;
+    m_LastPlayoutOffsetObservationUs = 0;
+    m_PlayoutOffsetSlewRemainder = 0;
     m_TimestampPlayoutActive = false;
 }
 
-int64_t VrrTimingController::observePlayoutOffset(uint64_t decodeCompleteUs,
-                                                  int64_t offsetUs)
+int64_t VrrTimingController::observePlayoutOffset(uint64_t observationUs,
+                                                int64_t offsetUs,
+                                                bool cadenceEligible,
+                                                bool phaseDiscontinuity)
 {
+    const bool timeBased = m_Parameters.playoutOffsetSlewUsPerSecond != 0;
+    const bool clockReversed = timeBased && m_PlayoutOffsetClockValid &&
+        observationUs < m_LastPlayoutOffsetObservationUs;
+    const bool breakWindow = m_Parameters.playoutOffsetCadenceGate != 0 &&
+        phaseDiscontinuity;
+    if (m_PlayoutOffsetValid && (breakWindow || clockReversed)) {
+        // A minimum from the previous source phase is not evidence that the
+        // new phase can be presented earlier. Discard observations, not the
+        // applied mapping or the interval buffer. End any remaining warmup:
+        // adopting a new minimum immediately would introduce a phase jump.
+        m_PlayoutOffsets.clear();
+        m_PlayoutSamplesSeen = std::max<uint64_t>(
+            m_PlayoutSamplesSeen, m_Parameters.playoutOffsetWarmupSamples);
+        m_PlayoutOffsetSlewRemainder = 0;
+    }
+
+    uint64_t allowedSlewUs = m_Parameters.playoutOffsetSlewUs;
+    if (timeBased) {
+        allowedSlewUs = 0;
+        if (m_PlayoutOffsetClockValid &&
+            observationUs > m_LastPlayoutOffsetObservationUs) {
+            // Clamp both factors before multiplying, even for direct callers
+            // that bypass replay parameter validation. Keep fractional credit
+            // so high FPS cannot round a small correction rate down to zero.
+            const uint64_t elapsedUs = std::min<uint64_t>(
+                observationUs - m_LastPlayoutOffsetObservationUs, 1000000);
+            const uint64_t rate = std::min<uint64_t>(
+                m_Parameters.playoutOffsetSlewUsPerSecond, 1000000);
+            const uint64_t credit = elapsedUs * rate +
+                m_PlayoutOffsetSlewRemainder;
+            const uint64_t maximumStepUs = std::min<uint64_t>(
+                m_Parameters.playoutOffsetMaximumStepUs, 1000000);
+            allowedSlewUs = std::min(credit / 1000000, maximumStepUs);
+            // A stall buys at most one bounded step, never future catch-up
+            // debt. Unused whole microseconds are deliberately not banked.
+            m_PlayoutOffsetSlewRemainder = allowedSlewUs < maximumStepUs ?
+                credit % 1000000 : 0;
+        }
+        else {
+            m_PlayoutOffsetSlewRemainder = 0;
+        }
+        m_LastPlayoutOffsetObservationUs = observationUs;
+        m_PlayoutOffsetClockValid = true;
+    }
+
+    if (m_Parameters.playoutOffsetCadenceGate != 0 &&
+        m_PlayoutOffsetValid && (!cadenceEligible || phaseDiscontinuity)) {
+        // Seed a genuine epoch once, but never learn its floor from an
+        // ineligible transition frame. Rejected samples cannot earn slew
+        // credit while the source is stalled or the cadence is provisional.
+        m_PlayoutOffsetSlewRemainder = 0;
+        return m_AppliedPlayoutOffsetUs;
+    }
     // Bound the window by both age and count so a pathological configuration
     // cannot grow the deque without limit.
     constexpr size_t kMaximumPlayoutOffsetSamples = 4096;
-    m_PlayoutOffsets.push_back(PlayoutOffsetSample { decodeCompleteUs,
-                                                     offsetUs });
+    m_PlayoutOffsets.push_back(PlayoutOffsetSample { observationUs, offsetUs });
     const uint64_t windowUs = m_Parameters.playoutOffsetWindowUs;
     while (m_PlayoutOffsets.size() > 1 &&
            (m_PlayoutOffsets.size() > kMaximumPlayoutOffsetSamples ||
-            (decodeCompleteUs > windowUs &&
-             m_PlayoutOffsets.front().decodeCompleteUs <
-                 decodeCompleteUs - windowUs))) {
+            (observationUs > windowUs &&
+             m_PlayoutOffsets.front().observationUs <
+                 observationUs - windowUs))) {
         m_PlayoutOffsets.pop_front();
     }
 
@@ -2273,7 +2343,7 @@ int64_t VrrTimingController::observePlayoutOffset(uint64_t decodeCompleteUs,
         // Steady state: track the earliest arrival in the window at a rate
         // far above clock drift but far below anything visible per frame.
         const int64_t slewUs = static_cast<int64_t>(std::min<uint64_t>(
-            m_Parameters.playoutOffsetSlewUs,
+            allowedSlewUs,
             static_cast<uint64_t>(std::numeric_limits<int64_t>::max())));
         if (windowMinimumUs > m_AppliedPlayoutOffsetUs) {
             m_AppliedPlayoutOffsetUs += std::min(
@@ -2283,6 +2353,10 @@ int64_t VrrTimingController::observePlayoutOffset(uint64_t decodeCompleteUs,
             m_AppliedPlayoutOffsetUs -= std::min(
                 slewUs, m_AppliedPlayoutOffsetUs - windowMinimumUs);
         }
+    }
+    if (timeBased && (m_PlayoutSamplesSeen <= m_Parameters.playoutOffsetWarmupSamples ||
+                      m_AppliedPlayoutOffsetUs == windowMinimumUs)) {
+        m_PlayoutOffsetSlewRemainder = 0;
     }
     return m_AppliedPlayoutOffsetUs;
 }
