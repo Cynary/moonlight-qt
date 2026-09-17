@@ -1520,8 +1520,10 @@ The original GPU-side render dependency and final render-ready fence remain.
 Preparation binds the backbuffer (clearing it only when the video quad does not cover
 the entire target, avoiding redundant 33 MB SDR / 66 MB HDR zero-writes per frame),
 renders video and overlays, and sets colorspace/HDR state. Direct decoder texture binding
-is used on all modern Feature Level 11.1+ hardware to eliminate full-frame uncompressed
-copies (CopySubresourceRegion1). It uses the D3D/FFmpeg context lock while manipulating
+follows stock Moonlight on Intel and on separate decode/render devices. AMD/NVIDIA
+single-device sessions keep the compatibility copy below 4K; 4K streams bind when
+the GPU has Feature Level 11.1+ or D3D11 fences, to avoid 12.5-25 MB
+CopySubresourceRegion1 copies. It uses the D3D/FFmpeg context lock while manipulating
 shared context state. Present-ready fence handling signals, flushes, polls completion,
 and waits on an event, releasing the lock during the wait so decoding can proceed. On
 successful fence completion, the context lock is not re-acquired on the preparation
@@ -2032,8 +2034,11 @@ An average FPS counter alone can conceal all of these.
 The deterministic suites are
 [tst_vrrtimingcontroller.cpp](tests/vrr/tst_vrrtimingcontroller.cpp),
 [tst_vrrratepolicy.cpp](tests/vrr/tst_vrrratepolicy.cpp),
-[tst_vrrpacingworker.cpp](tests/vrr/tst_vrrpacingworker.cpp), and
-[tst_vrrreplayconfig.cpp](tests/vrr/tst_vrrreplayconfig.cpp).
+[tst_vrrpacingworker.cpp](tests/vrr/tst_vrrpacingworker.cpp),
+[tst_vrrreplayconfig.cpp](tests/vrr/tst_vrrreplayconfig.cpp),
+[tst_vrrrenderpolicy.cpp](tests/vrr/tst_vrrrenderpolicy.cpp), and
+[tst_d3d11bindpolicy.cpp](tests/vrr/tst_d3d11bindpolicy.cpp).
+The last covers the 4K decoder-bind vs compatibility-copy rule.
 They cover timing arithmetic, timestamp wrap/rebase, cadence changes, delay and
 history behavior, queue/drop/cancellation/suspension, ownership, wait floors,
 trace integrity, native diagnostic modeling, and replay configuration/contracts.

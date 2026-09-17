@@ -2,6 +2,7 @@
 #include <initguid.h>
 
 #include "d3d11va.h"
+#include "d3d11bindpolicy.h"
 #include "d3d11fencewait.h"
 #include "dxutil.h"
 #include "path.h"
@@ -615,21 +616,43 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
                     "Using D3D11VA_FORCE_BIND to override default bind/copy logic");
     }
     else {
-        // Skip copying to our own internal texture whenever direct binding is supported.
-        // Copying an uncompressed 4K frame (12.5 - 25 MB) every frame consumes massive
-        // bandwidth and introduces severe GPU preparation latency tails.
-        // Direct binding is safe on Intel GPUs (always supported and tested),
-        // whenever separate devices with fences are used, and on any modern GPU
-        // supporting Feature Level 11.1+ or monitored/non-monitored fences.
-        m_BindDecoderOutputTextures = adapterDesc.VendorId == 0x8086 ||
-                                      separateDevices ||
-                                      m_FenceType != SupportedFenceType::None ||
-                                      featureLevel >= D3D_FEATURE_LEVEL_11_1;
+        // Keep stock Moonlight's Intel / separate-device bind path. AMD/NVIDIA
+        // single-device sessions stay on the compatibility copy except at 4K,
+        // where the uncompressed copy is 12.5-25 MB/frame.
+        const bool intelGpu = adapterDesc.VendorId == 0x8086;
+        const bool bindSafeOnDiscreteGpu =
+            m_FenceType != SupportedFenceType::None ||
+            featureLevel >= D3D_FEATURE_LEVEL_11_1;
+        m_BindDecoderOutputTextures = d3d11ShouldBindDecoderOutputTextures(
+            intelGpu,
+            separateDevices,
+            bindSafeOnDiscreteGpu,
+            m_DecoderParams.width,
+            m_DecoderParams.height);
+    }
+
+    const char* bindReason = "compatibility copy";
+    if (m_BindDecoderOutputTextures) {
+        if (adapterDesc.VendorId == 0x8086) {
+            bindReason = "Intel";
+        }
+        else if (separateDevices) {
+            bindReason = "separate devices";
+        }
+        else if (d3d11StreamIs4kClass(m_DecoderParams.width, m_DecoderParams.height)) {
+            bindReason = "4K stream";
+        }
+        else {
+            bindReason = "override";
+        }
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Decoder texture access: %s (fence: %s)",
+                "Decoder texture access: %s (%s, %dx%d, fence: %s)",
                 m_BindDecoderOutputTextures ? "bind" : "copy",
+                bindReason,
+                m_DecoderParams.width,
+                m_DecoderParams.height,
                  m_FenceType == SupportedFenceType::Monitored ? "monitored" :
                     (m_FenceType == SupportedFenceType::NonMonitored ? "non-monitored" : "unsupported"));
 

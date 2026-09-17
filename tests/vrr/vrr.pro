@@ -27,6 +27,8 @@ amddecodepolicy.file = $$PWD/amddecodepolicy.pro
 SUBDIRS += amddecodepolicy
 vrrrenderpolicy.file = $$PWD/vrrrenderpolicy.pro
 SUBDIRS += vrrrenderpolicy
+d3d11bindpolicy.file = $$PWD/d3d11bindpolicy.pro
+SUBDIRS += d3d11bindpolicy
 gamescopecomposition.file = $$PWD/gamescopecomposition.pro
 SUBDIRS += gamescopecomposition
 linux:packagesExist(vulkan) {
