@@ -5,8 +5,18 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Source baseline: `adb5d787` plus Linux VRR probe/playback color-range
-alignment (2026-09-16), originally `352f4827` plus removal of the Allow tearing preference
+Source baseline: `fb8bf9e7` plus only the D3D11 4K binding eligibility change
+(2026-09-17). Single-device streams at least 3840x2160 bind instead of copying
+when Feature Level 11.1+ or D3D11 fences are available. Existing Intel and
+separate-device binding, lower-resolution copy behavior and explicit overrides
+are unchanged. Backbuffer clearing, context locking, pacing, buffering, native
+presentation and replay match the pre-optimization baseline. The subsequent
+raster-guard, buffer-first and startup/replay experiments have been removed at
+the user's request after continued tearing; their changes are archived outside
+the worktree. This binding-only restoration is not yet live-confirmed tear-free.
+
+The baseline includes Linux VRR probe/playback color-range alignment
+(2026-09-16), originally `352f4827` plus removal of the Allow tearing preference
 (2026-09-15),
 client-processing,
 vrr14-style compact stats reporting, restored Reduce judder, reconnect
@@ -1517,18 +1527,14 @@ output time, and enters the existing explicit decode-wait telemetry. This keeps
 decoder synchronization out of the measured rendering service used by prediction.
 The original GPU-side render dependency and final render-ready fence remain.
 
-Preparation binds the backbuffer (clearing it only when the video quad does not cover
-the entire target, avoiding redundant 33 MB SDR / 66 MB HDR zero-writes per frame),
-renders video and overlays, and sets colorspace/HDR state. Direct decoder texture binding
-follows stock Moonlight on Intel and on separate decode/render devices. AMD/NVIDIA
-single-device sessions keep the compatibility copy below 4K; 4K streams bind when
-the GPU has Feature Level 11.1+ or D3D11 fences, to avoid 12.5-25 MB
-CopySubresourceRegion1 copies. It uses the D3D/FFmpeg context lock while manipulating
-shared context state. Present-ready fence handling signals, flushes, polls completion,
-and waits on an event, releasing the lock during the wait so decoding can proceed. On
-successful fence completion, the context lock is not re-acquired on the preparation
-exit path, eliminating thread contention between the pacing worker and concurrent
-FFmpeg decode of subsequent frames.
+Preparation binds and clears the backbuffer, renders video and overlays, and sets
+colorspace/HDR state. Direct decoder texture binding follows stock Moonlight on
+Intel and on separate decode/render devices. AMD/NVIDIA single-device sessions
+keep the compatibility copy below 4K; 4K streams bind when the GPU has Feature
+Level 11.1+ or D3D11 fences. It uses the D3D/FFmpeg context lock while manipulating
+shared state. Present-ready fence handling signals, flushes, polls completion,
+and waits on an event, releasing the lock during the wait so decoding can proceed,
+then re-acquiring it before publishing the frame.
 The complete fence wait has a 50 ms bound. It blocks on the event in 1 ms slices
 and checks the fence value between waits; the value, rather than notification
 delivery alone, proves readiness. A stale notification cannot release incomplete
