@@ -631,9 +631,10 @@ macx {
     }
 }
 
-# Displayed version stays CI_VERSION (e.g. 6.1.0-vrr17). Windows PE/MSI
+# Displayed version stays CI_VERSION (e.g. 6.1.0-vrr17.1). Windows PE/MSI
 # ProductVersion can only use three numeric fields and must increase past
-# stock Moonlight 6.1.0, so VRR builds map 6.1.0-vrrN to 6.2.N.
+# stock Moonlight 6.1.0, so VRR builds map 6.1.0-vrrN to 6.2.N and
+# 6.1.0-vrrN.P to 6.2.(N*10+P).
 VERSION = "$$BASE_VERSION"
 PE_VERSION = $$(MOONLIGHT_PE_VERSION)
 !isEmpty(PE_VERSION) {

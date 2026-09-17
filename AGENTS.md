@@ -190,7 +190,9 @@ VC++ redistributable, and is not the user-facing installer. After both
 architectures are built, `generate-bundle.bat` writes
 `build\installer-release\MoonlightSetup-<version>.exe`. VRR tags
 `6.1.0-vrrN` stamp the PE/MSI product version as `6.2.N` so Windows Installer
-can replace stock Moonlight 6.1.0 and earlier VRR MSIs. Copy `vrrreplay.exe`
+can replace stock Moonlight 6.1.0 and earlier VRR MSIs. Patch tags
+`6.1.0-vrrN.P` stamp `6.2.(N*10+P)` (vrr17.1 is 6.2.171). Integer tags after
+vrr17 stamp `6.2.(N*10)` so they remain newer than those patches. Copy `vrrreplay.exe`
 and `decode-vrr-trace.py` into the deploy tree and recreate the ZIP before
 uploading so the portable package carries the diagnostics, as the release
 notes promise. The Linux AppImage and Flatpak assets are not produced by this

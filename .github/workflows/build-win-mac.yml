@@ -193,8 +193,11 @@ jobs:
           $ci = $Env:CI_VERSION
           $bundle = "build/installer-release/MoonlightSetup-$ci.exe"
           if (!(Test-Path $bundle)) { throw "Missing installer bundle $bundle" }
-          if ($ci -match '-vrr(\d+)$') {
-            $expected = "6.2.$($Matches[1])"
+          if ($ci -match '-vrr\d+') {
+            $expected = & ./scripts/vrr-pe-version.ps1 -CiVersion $ci
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($expected)) {
+              throw "Could not map CI_VERSION '$ci' to a Windows PE/MSI version"
+            }
             $exe = "build/build-x64-release/app/release/Moonlight.exe"
             $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
             if ($info.FileVersion -notlike "$expected*") {
