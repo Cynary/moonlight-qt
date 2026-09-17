@@ -615,16 +615,16 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
                     "Using D3D11VA_FORCE_BIND to override default bind/copy logic");
     }
     else {
-        // Skip copying to our own internal texture on Intel GPUs due to
-        // significant performance impact of the extra copy. See:
-        // https://github.com/moonlight-stream/moonlight-qt/issues/1304
-        //
-        // Also bind SRVs when using separate decoding and rendering
-        // devices as this improves render times by about 2x on my
-        // Ryzen 3300U system. The fences we use between decoding
-        // and rendering contexts should hopefully avoid any of the
-        // synchronization issues we've seen between decoder and SRVs.
-        m_BindDecoderOutputTextures = adapterDesc.VendorId == 0x8086 || separateDevices;
+        // Skip copying to our own internal texture whenever direct binding is supported.
+        // Copying an uncompressed 4K frame (12.5 - 25 MB) every frame consumes massive
+        // bandwidth and introduces severe GPU preparation latency tails.
+        // Direct binding is safe on Intel GPUs (always supported and tested),
+        // whenever separate devices with fences are used, and on any modern GPU
+        // supporting Feature Level 11.1+ or monitored/non-monitored fences.
+        m_BindDecoderOutputTextures = adapterDesc.VendorId == 0x8086 ||
+                                      separateDevices ||
+                                      m_FenceType != SupportedFenceType::None ||
+                                      featureLevel >= D3D_FEATURE_LEVEL_11_1;
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2231,9 +2231,28 @@ bool D3D11VARenderer::prepareFrameForPresent(AVFrame* frame,
         m_RenderTargetView = view;
     }
 
-    // Clear the back buffer.
-    const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
+    // Scale video to the window size while preserving aspect ratio
+    SDL_Rect src, dst;
+    src.x = src.y = 0;
+    src.w = frame->width;
+    src.h = frame->height;
+    dst.x = dst.y = 0;
+    dst.w = m_DisplayWidth;
+    dst.h = m_DisplayHeight;
+    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+
+    // Clear the back buffer only when the video does not cover the entire render target
+    // (e.g. letterboxed or pillarboxed). When the video quad covers 100% of the display,
+    // ClearRenderTargetView wastes 33.2 MB (SDR) to 66.4 MB (HDR) of memory bandwidth
+    // per frame (4.8 to 9.6 GB/s at 144 Hz) with zero visual effect because the opaque
+    // video quad overwrites every pixel.
+    const bool coversEntireTarget = (dst.x == 0 && dst.y == 0 &&
+                                     dst.w == m_DisplayWidth &&
+                                     dst.h == m_DisplayHeight);
+    if (!coversEntireTarget) {
+        const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        m_RenderDeviceContext->ClearRenderTargetView(m_RenderTargetView.Get(), clearColor);
+    }
 
     // Bind the back buffer. This needs to be done each time because Present()
     // unbinds the render target view.
@@ -2414,12 +2433,11 @@ bool D3D11VARenderer::waitForVrrPresentReady(uint64_t decodeBoundary)
     m_VrrGpuReadyWaitResult = waitResult;
     m_VrrGpuReadyTimeUs = LiGetMicroseconds();
 
-    if (releaseContextWhileWaiting) {
-        lockContext(this);
-        m_VrrContextLocked = true;
-    }
-
     if (waitResult != WAIT_OBJECT_0) {
+        if (releaseContextWhileWaiting) {
+            lockContext(this);
+            m_VrrContextLocked = true;
+        }
         const uint64_t lockReacquireUs = LiGetMicroseconds() - m_VrrGpuReadyTimeUs;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "D3D11 VRR present-ready fence wait failed or timed out: %lu (target=%llu completed=%llu event=%lu device=%x)",
@@ -2538,16 +2556,24 @@ VrrPrepareResult D3D11VARenderer::prepareFrame(AVFrame* frame,
         m_VrrFallbackReason = VrrFallbackReason::AdaptivePresentationUnavailable;
         populateVrrGpuReadyFeedback(result.feedback);
         result.feedback.cancelled = true;
+        if (!m_VrrContextLocked) {
+            lockContext(this);
+            m_VrrContextLocked = true;
+        }
         releasePreparedVrrFrame();
         queueRenderDeviceReset();
         return result;
     }
 
-    // The shared-device fence wait temporarily releases the renderer lock.
-    // Revalidate state after reacquiring it before publishing this frame.
+    // The shared-device fence wait releases the renderer lock to allow FFmpeg
+    // to continue decoding concurrently. Revalidate state before publishing.
     if (m_VrrSuspended || checkSupport() != VrrFallbackReason::NoFallback) {
         populateVrrGpuReadyFeedback(result.feedback);
         result.feedback.cancelled = true;
+        if (!m_VrrContextLocked) {
+            lockContext(this);
+            m_VrrContextLocked = true;
+        }
         releasePreparedVrrFrame();
         return result;
     }
@@ -2559,6 +2585,10 @@ VrrPrepareResult D3D11VARenderer::prepareFrame(AVFrame* frame,
                      deviceReason);
         populateVrrGpuReadyFeedback(result.feedback);
         result.feedback.cancelled = true;
+        if (!m_VrrContextLocked) {
+            lockContext(this);
+            m_VrrContextLocked = true;
+        }
         releasePreparedVrrFrame();
         queueRenderDeviceReset();
         return result;
@@ -2577,8 +2607,10 @@ VrrPrepareResult D3D11VARenderer::prepareFrame(AVFrame* frame,
     // Never hold the FFmpeg/D3D context mutex while the pacing worker waits
     // for its presentation target. Keeping it here serializes D3D11VA decode
     // behind pacing and is especially damaging at 4K high refresh rates.
-    unlockContext(this);
-    m_VrrContextLocked = false;
+    if (m_VrrContextLocked) {
+        unlockContext(this);
+        m_VrrContextLocked = false;
+    }
     return result;
 }
 

@@ -1517,10 +1517,16 @@ output time, and enters the existing explicit decode-wait telemetry. This keeps
 decoder synchronization out of the measured rendering service used by prediction.
 The original GPU-side render dependency and final render-ready fence remain.
 
-Preparation binds/clears the backbuffer, renders video and overlays, and sets
-colorspace/HDR state. It uses the D3D/FFmpeg context lock while manipulating
-shared state. Present-ready fence handling signals, flushes, polls completion,
-and waits on an event, releasing the lock where needed so decoding can proceed.
+Preparation binds the backbuffer (clearing it only when the video quad does not cover
+the entire target, avoiding redundant 33 MB SDR / 66 MB HDR zero-writes per frame),
+renders video and overlays, and sets colorspace/HDR state. Direct decoder texture binding
+is used on all modern Feature Level 11.1+ hardware to eliminate full-frame uncompressed
+copies (CopySubresourceRegion1). It uses the D3D/FFmpeg context lock while manipulating
+shared context state. Present-ready fence handling signals, flushes, polls completion,
+and waits on an event, releasing the lock during the wait so decoding can proceed. On
+successful fence completion, the context lock is not re-acquired on the preparation
+exit path, eliminating thread contention between the pacing worker and concurrent
+FFmpeg decode of subsequent frames.
 The complete fence wait has a 50 ms bound. It blocks on the event in 1 ms slices
 and checks the fence value between waits; the value, rather than notification
 delivery alone, proves readiness. A stale notification cannot release incomplete
