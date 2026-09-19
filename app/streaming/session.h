@@ -10,6 +10,7 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "diagnostics/diagnosticcapture.h"
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -272,6 +273,7 @@ private:
 
     StreamingPreferences* m_Preferences;
     PresentationSettings m_PresentationSettings;
+    std::unique_ptr<DiagnosticCapture> m_DiagnosticCapture;
     bool m_IsFullScreen;
     SupportedVideoFormatList m_SupportedVideoFormats; // Sorted in order of descending priority
     STREAM_CONFIGURATION m_StreamConfig;

@@ -26,6 +26,7 @@ if "%~1"=="--align" (
 set "MOONLIGHT_VRR_CAPTURE="
 set "MOONLIGHT_VRR_TRACE=%TRACE_DIR%\%PREFIX%-%STAMP%.vrrtrace"
 set "MOONLIGHT_VRR_DEEP_TRACE=1"
+rem This external trace destination takes precedence over the Settings tracing checkbox.
 set "MOONLIGHT_BFI_FORCE_TEARING="
 set "SUMMARY=%TRACE_DIR%\%PREFIX%-%STAMP%-replay.json"
 echo Capture: "%MOONLIGHT_VRR_TRACE%"

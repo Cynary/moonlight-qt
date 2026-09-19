@@ -145,6 +145,9 @@ public:
     Q_PROPERTY(bool enableVrr MEMBER enableVrr NOTIFY enableVrrChanged)
     Q_PROPERTY(int vrrLatencyMode MEMBER vrrLatencyMode NOTIFY vrrLatencyModeChanged)
     Q_PROPERTY(bool smoothVrrFrameTiming MEMBER smoothVrrFrameTiming NOTIFY smoothVrrFrameTimingChanged)
+    Q_PROPERTY(bool traceVrrFrames MEMBER traceVrrFrames NOTIFY traceVrrFramesChanged)
+    Q_PROPERTY(bool exportingDiagnostics MEMBER m_ExportingDiagnostics NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString diagnosticsStatus MEMBER m_DiagnosticsStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
@@ -178,6 +181,9 @@ public:
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged);
 
     Q_INVOKABLE bool retranslate();
+    Q_INVOKABLE void openDiagnosticsFolder();
+    Q_INVOKABLE void exportLatestDiagnostics();
+    void setDiagnosticsStatus(const QString& message);
 
     // Rate choices are advisory; toggling VRR never rewrites the saved FPS
     // preference.
@@ -197,6 +203,7 @@ public:
     // adaptive-refresh floor, so the panel never engages its own
     // low-framerate compensation.
     bool smoothVrrFrameTiming;
+    bool traceVrrFrames;
     bool gameOptimizations;
     bool playAudioOnHost;
     bool multiController;
@@ -239,6 +246,8 @@ signals:
     void enableVrrChanged();
     void vrrLatencyModeChanged();
     void smoothVrrFrameTimingChanged();
+    void traceVrrFramesChanged();
+    void diagnosticsChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
     void multiControllerChanged();
@@ -277,4 +286,6 @@ private:
     QString getSuffixFromLanguage(Language lang);
 
     QQmlEngine* m_QmlEngine;
+    bool m_ExportingDiagnostics = false;
+    QString m_DiagnosticsStatus;
 };

@@ -1,7 +1,15 @@
 # VRR deterministic tests
 
+User-facing Windows/Linux frame tracing and log export is documented in
+[VRR diagnostics](../../docs/vrr-diagnostics.md). `tst_vrrdiagnostics` covers
+the Desktop destination, capture lifetime, external-launcher precedence, Unicode
+paths and ZIP export. The tracing checkbox does not switch timing policies.
+Set `MOONLIGHT_DIAGNOSTICS_TEST_EXPORT` to a new `.zip` path to export its fixture,
+then run `python3 tests/vrr/check_diagnostic_zip.py PATH` for independent CRC and
+content verification. Cold/warm worker exports use the current production policy.
+
 The interval-quality queue is now the production VRR policy (responsive
-revision 7). There is no queue-policy A/B checkbox; saved `v2queue` values are ignored and
+revision 7). There is no legacy queue-policy A/B checkbox; saved `v2queue` values are ignored and
 removed when settings are saved. Every normal session uses 0.5 ms tolerance for
 Low Latency and Balanced Target and 0.2 ms for Smooth, with severity-weighted
 preset histories and targets of
@@ -9,10 +17,21 @@ preset histories and targets of
 holds are 6 / 8 / 10 seconds and release speeds are 125 / 100 / 50 us per
 second. Their score histories are 1 / 2 / 5 minutes respectively. Growth
 requires both below-target quality and fresh readiness-related interval error.
+Preset allowances are now 2/2/4 fitted source frames, additionally limited by
+16/16/24 ms and the unchanged three-frame queue-capacity bound. Initial interval
+calibration needs at least 500 ms and 32 consecutive valid intervals. Growth
+still requests at most 250 us per 250 ms and applies at most 125 us per frame.
+Completing calibration is sticky across sequence breaks and FPS changes;
+subsequent requalification retains the historical one-second gate. The controller
+suite checks 20/30/60/116/240 FPS startup, repeated 120/19/30/99/116/60 FPS
+transitions across all presets and smoothing settings, unchanged attack bounds,
+and no padding growth from clean variable-rate source intervals alone.
 See architecture.md for the complete measurement and bounds.
 
 Historical policy implementations remain available through explicit captured
-controller parameters; session configuration no longer selects a queue-policy A/B arm.
+controller parameters; session configuration no longer selects the legacy queue-policy
+A/B arm. The user-facing diagnostic checkbox only enables tracing; it cannot
+change the timing policy or buffer allowance.
 Both ordinary and warm fixture exports inherit the current production policy.
 Existing historical arithmetic and trace tests remain, and the revision-6/7/8
 replay support is covered by the deterministic suites below. A passing local
@@ -327,8 +346,10 @@ controller parameter set, controller call duration and learned-model state,
 stale-check age, render/target wait boundaries, both spacing-floor checks,
 correction-wait boundaries, explicit worker-requested rebase cause, and
 terminal time. The parameter set includes the source-frame-relative playout
-cap so new captures distinguish the 0.5/1/2-frame presets while older headers
-retain their historical default. Header-resolved schema-5 extensions also record the native
+cap so new captures distinguish the 2/2/4-frame allowances while older captures
+retain their recorded ratios or historical default. Initial-calibration
+duration/sample parameters default to one second/two intervals when missing;
+new production captures record 500 ms/32 intervals. Header-resolved schema-5 extensions also record the native
 queue policy, render baseline, render-tail insurance, pacing-latency budget,
 presentation backend/result, signed `GetLastPresentCount()` and
 `GetFrameStatistics()` results, the exact DXGI Present sync interval/flags,
@@ -1377,8 +1398,8 @@ directory.
 
 ### Per-frame production presentation protection
 
-Production sets `playout_adaptive_only=0` and `playout_per_frame_latch=2`.
-Slots closer than a display period plus guard plus safety headroom use native protection when the
+Production sets `playout_adaptive_only=0` and `playout_per_frame_latch=1`, matching
+vrr14. Slots closer than a display period plus guard use native protection when the
 presenter supports it, removing the software floor for that slot. DXGI can
 alternate synchronized and tearing presents; composition provides native
 ordering without DXGI flags. The controller suite checks bounded latency at
@@ -1386,17 +1407,18 @@ ordering without DXGI flags. The controller suite checks bounded latency at
 with source-rate headroom. Explicit adaptive-only and rate-protection policies
 remain covered for historical replay.
 
-Revision 2 restores VRR12's 225 us entry / 400 us exit headroom thresholds
-on the planned slot. Revision 1 retains the historical period-plus-guard rule;
+Historical revision 2 adds VRR12's 225 us entry / 400 us exit headroom thresholds
+on the planned slot. Revision 1 uses the period-plus-guard rule;
 revision 0 retains the cadence-based policy. Boundary tests exercise both
 thresholds across all presets and 60/120/144/165/240/360 Hz. The 116/120 fixture
-checks restored protection with unchanged planned deadlines and buffer depth,
-alongside the explicit revision-1 result. These checks do not measure native
+checks adaptive production slots with unchanged planned deadlines and buffer depth,
+alongside explicit revision-2 protected slots. These checks do not measure native
 blocking or physical tearing. Use the rebuilt replay for revision-2 captures.
 
 On persistent Vulkan Immediate/FIFO, `canLatchAdaptivePresent()` stays false.
-The software floor includes the entry margin instead of requesting a mode
-change. Tests exercise this floor across the same presets/refresh rates,
+The production software floor is a display period plus guard; explicit revision
+2 adds its entry margin instead of requesting a mode change. Tests exercise
+this floor across the same presets/refresh rates,
 including late submissions. Persistent Mailbox supplies native protection.
 The Vulkan selection/capability suites cover those distinctions; no per-frame
 request recreates or replaces the swapchain. Native Linux visual behavior
@@ -1478,3 +1500,39 @@ captures without immutable output retain their historical boundary. Busy-worker
 reconstruction caps a learned idle floor by the current row's observed readiness;
 a long startup wait cannot shift an otherwise unchanged replay. Both contracts
 have deterministic regressions in `tst_vrrreplayconfig`.
+
+# Buffer accounting extension (2026-09-18)
+
+Schema-5 captures append buffer limits, source-offset and presentation-floor
+costs, and outcome-time interval-buffer updates. `buffer_update_valid` requires
+the observer's frame to match this row; catch-up growth can attribute a different
+preceding frame through `buffer_attributed_frame`. Before/after values describe
+the next request, not the delay already used by this frame. Clipped increments
+are rejected steps and never become stored demand. Replay verifies the optional
+extension when present and preserves the historical gate for older captures.
+
+`scripts/report-vrr-latency.py` emits observed stage costs, policy offsets and
+buffer events. GPU decode synchronization remains a separate statistic; the
+existing overlay decoding/queue/rendering definitions do not change. Additive
+client-stage means share one valid-row denominator and a matching partitioned
+total; GPU-ready/acquisition details and budgets overlap those stages and must
+not be added again. Missing timestamps remain unavailable rather than zero.
+
+`scripts/make-vrr-review-config.py` combines a current-policy replay summary
+with `configs/vrr17-review-variants.json` to produce a diagnostic batch isolating
+smoothing, latch margin and reserve feedback. The complete base prevents partial
+overrides from reverting unrelated controls to generic defaults. Its hybrid is
+not an approved production policy or an exact vrr14 emulator.
+See [review](../../docs/vrr17-review.md).
+From the repository root, use
+`--variants tests/vrr/configs/vrr17-calibration-variants.json` to isolate initial-calibration duration and latch
+headroom around the current production policy instead. See the
+[follow-up](../../docs/vrr17-calibration.md) for the selected policy and validation.
+
+Run `python3 -m unittest discover -s tests/vrr -p 'test_*.py'` for the report and
+config-generator contracts. After exporting a current warm worker trace, run
+`python3 tests/vrr/check_buffer_trace_audit.py /path/to/vrrreplay /path/to/warm.csv`.
+It first requires an exact baseline, then changes eight optional accounting
+fields and the three calibration fields when present, independently repairing
+the CSV footer hash. Each modified trace must
+fail the semantic exact gate, not merely the file-integrity check.

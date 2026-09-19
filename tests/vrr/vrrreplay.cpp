@@ -13068,6 +13068,48 @@ int main(int argc, char* argv[])
             }
         }
         metrics.lastFeedbackDecision = simulatedDecision;
+        // Optional schema-5 extension. Old captures retain their original gate;
+        // when the extension is present every recorded reason/cost must match.
+        const auto auditBufferField = [&](const char* name, uint64_t expected) {
+            const int column = traceHeader.indexOf(name);
+            if (column < 0 || optionalUnsignedField(fields, column) != expected) {
+                std::fprintf(stderr, "Buffer diagnostic drift: %s on frame %d\n", name, frameNumber);
+                ++metrics.invalidControllerLifecycleRows;
+            }
+        };
+        if (traceHeader.contains("buffer_cap_us")) {
+            auditBufferField("buffer_cap_us", referenceDecision.playoutDelayMaximumUs);
+            auditBufferField("buffer_queue_limit_us", referenceDecision.playoutQueueLimitUs);
+            auditBufferField("buffer_preset_cap_us", referenceDecision.playoutPresetCapUs);
+            auditBufferField("presentation_floor_push_us", referenceDecision.presentationFloorPushUs);
+            const int offsetColumn = traceHeader.indexOf("playout_offset_us");
+            if (offsetColumn < 0 || optionalSignedField(fields, offsetColumn) != referenceDecision.playoutOffsetUs)
+                ++metrics.invalidControllerLifecycleRows;
+        }
+        const auto auditBufferUpdate = [&]() {
+            if (!traceHeader.contains("buffer_update_valid")) return;
+            const auto& update = referenceController->intervalStats().update;
+            auditBufferField("buffer_update_valid", capturedParameters.playoutResponsiveBuffer >= 6 &&
+                update.frame == uint64_t(frameNumber) && update.atUs != 0);
+            auditBufferField("buffer_update_at_us", update.atUs);
+            auditBufferField("buffer_update_frame", update.frame);
+            auditBufferField("buffer_action", static_cast<uint64_t>(update.action));
+            auditBufferField("buffer_attributed_frame", update.attributedFrame);
+            auditBufferField("buffer_request_before_us", update.beforeUs);
+            auditBufferField("buffer_request_after_us", update.requestedUs);
+            auditBufferField("buffer_interval_error_us", update.intervalErrorUs);
+            auditBufferField("buffer_lateness_us", update.latenessUs);
+            auditBufferField("buffer_attempted_increase_us", update.attemptedIncreaseUs);
+            auditBufferField("buffer_clipped_increase_us", update.clippedIncreaseUs);
+            auditBufferField("buffer_hold_remaining_us", update.holdRemainingUs);
+            auditBufferField("buffer_cooldown_remaining_us", update.cooldownRemainingUs);
+            if (traceHeader.contains("buffer_calibration_complete")) {
+                const auto stats = referenceController->intervalStats();
+                auditBufferField("buffer_calibration_complete", stats.initialCalibrationComplete);
+                auditBufferField("buffer_calibration_samples", stats.calibrationSamples);
+                auditBufferField("buffer_calibration_coverage_us", stats.calibrationCoverageUs);
+            }
+        };
         metrics.feedbackCapacityLimitedFrames += simulatedDecision.playoutCapacityLimited;
         metrics.exactReferenceTargets += referenceTargetDrift == 0 ? 1 : 0;
         metrics.referenceSourceIntervalDrift.add(absoluteValue(
@@ -14513,6 +14555,7 @@ int main(int argc, char* argv[])
             // point, then reproduce the mutation that affects the next row.
             addReferenceControllerDiagnostics(
                 metrics, referenceController->diagnostics(), fields, columns);
+            auditBufferUpdate();
             if (staleAfterRenderLifecycle) {
                 if (referenceController->latencyFixActive() ||
                     referenceController->parameters().playoutMetronomeEnabled)
@@ -14539,6 +14582,7 @@ int main(int argc, char* argv[])
                                                  simulatedSubmissionUs);
             addReferenceControllerDiagnostics(
                 metrics, referenceController->diagnostics(), fields, columns);
+            auditBufferUpdate();
         }
 
         if (optionalUnsignedField(fields, columns.presentEndUs) && !staleBeforeRenderLifecycle && !staleAfterRenderLifecycle) {

@@ -1,5 +1,6 @@
 #include <QNetworkInterface>
 #include <QSysInfo>
+#include <QDir>
 #include "session.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
@@ -1456,6 +1457,11 @@ private:
         }
 
         // Exit the entire program if requested
+        if (m_Session->m_DiagnosticCapture) {
+            Utils::flushLogs();
+            m_Session->m_DiagnosticCapture.reset();
+        }
+
         if (m_Session->m_ShouldExit) {
             QCoreApplication::instance()->quit();
         }
@@ -1902,6 +1908,32 @@ void Session::start()
 
     // We're now active
     s_ActiveSession = this;
+
+    if (m_Preferences->traceVrrFrames) {
+        Utils::flushLogs();
+        const QJsonObject metadata{
+            {"requested_width", m_StreamConfig.width},
+            {"requested_height", m_StreamConfig.height},
+            {"requested_fps", m_StreamConfig.fps},
+            {"bitrate_kbps", m_StreamConfig.bitrate},
+            {"vrr_requested", m_Preferences->enableVrr},
+            {"vrr_qualified", m_PresentationSettings.enableVrr},
+            {"display_refresh_hz", m_PresentationSettings.refreshRate},
+            {"latency_mode", m_PresentationSettings.vrrLatencyMode},
+            {"reduce_judder", m_PresentationSettings.smoothVrrFrameTiming}
+        };
+        QString error;
+        m_DiagnosticCapture = DiagnosticCapture::begin(DiagnosticCapture::rootDirectory(), metadata, error);
+        if (m_DiagnosticCapture) {
+            m_Preferences->setDiagnosticsStatus(tr("Recording folder: %1. Disconnect before exporting.")
+                .arg(QDir::toNativeSeparators(m_DiagnosticCapture->directory())));
+            qInfo() << "VRR diagnostic capture:" << m_DiagnosticCapture->directory();
+        }
+        else {
+            m_Preferences->setDiagnosticsStatus(error);
+            qWarning() << "Settings diagnostics not enabled:" << error;
+        }
+    }
 
     // Initialize the gamepad code with our preferences
     // NB: m_InputHandler must be initialize before starting the connection.

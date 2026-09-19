@@ -84,6 +84,11 @@ constexpr char kTraceHeader[] =
     VRR_TIMING_PARAMETER_FIELDS(VRR_TRACE_PARAMETER_HEADER)
     ",decoder_output_us,session_latency_mode,session_readiness_hitch_feedback,calibration_loaded,initial_cached_samples,history_version,history_state_valid,history_samples,history_misses,history_duration_us,history_can_release"
     ",session_latency_oscillation,latency_test_phase,session_allow_tearing"
+    ",buffer_cap_us,buffer_queue_limit_us,buffer_preset_cap_us,playout_offset_us,presentation_floor_push_us"
+    ",buffer_update_valid,buffer_update_at_us,buffer_update_frame,buffer_action,buffer_attributed_frame"
+    ",buffer_request_before_us,buffer_request_after_us,buffer_interval_error_us,buffer_lateness_us"
+    ",buffer_attempted_increase_us,buffer_clipped_increase_us,buffer_hold_remaining_us,buffer_cooldown_remaining_us"
+    ",buffer_calibration_complete,buffer_calibration_samples,buffer_calibration_coverage_us"
     "\n";
 #undef VRR_TRACE_PARAMETER_HEADER
 constexpr uint32_t kVrrWindowStateMask =
@@ -153,11 +158,9 @@ uint64_t submissionBoundaryUs(const VrrPresentFeedback& feedback,
 }
 
 #ifdef _WIN32
-bool isUncPath(const char* path)
+bool isUncPath(const QString& path)
 {
-    return path != nullptr &&
-        ((path[0] == '\\' && path[1] == '\\') ||
-         (path[0] == '/' && path[1] == '/'));
+    return path.startsWith(QStringLiteral("\\\\")) || path.startsWith(QStringLiteral("//"));
 }
 #endif
 
@@ -175,8 +178,9 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
         config, m_CanLatchPresentation,
         vrrTimingParametersForSession(config)))
 {
-    const char* deepTraceEnv = SDL_getenv("MOONLIGHT_VRR_DEEP_TRACE");
-    m_DeepTraceEnabled = deepTraceEnv != nullptr && deepTraceEnv[0] == '1';
+    // Settings enables tracing after SDL initialization. SDL2-compat may cache
+    // its environment, so read the current process value just like the path.
+    m_DeepTraceEnabled = qEnvironmentVariable("MOONLIGHT_VRR_DEEP_TRACE").startsWith(QLatin1Char('1'));
 
     VrrTargetWaiterHooks hooks;
     hooks.nowUs = []() {
@@ -819,6 +823,13 @@ int VrrPacingWorker::run()
                     telemetry.presentEndUs - frame.decoderOutputUs() : 0;
             sample.renderingTimeUs = telemetry.preparationDurationUs +
                 telemetry.presentDurationUs;
+            sample.preparationUs = telemetry.preparationDurationUs;
+            sample.presentCallUs = telemetry.presentDurationUs;
+            sample.gpuReadyWaitUs = gpuReadyWaitUs;
+            sample.gpuReadyWaitValid = gpuReadyCompleted;
+            sample.latched = decision.latchedPresentation;
+            sample.bufferCapUs = decision.playoutDelayMaximumUs;
+            sample.gpuReadinessLeadUs = decision.gpuReadinessLeadUs;
             const uint64_t readinessDeadlineUs =
                 m_TimingController->parameters().playoutResponsiveBuffer >= 3 ?
                 decision.originalTargetUs : decision.targetUs;
@@ -1162,6 +1173,7 @@ void VrrPacingWorker::recordFrameCompletion(const QueuedFrame& queuedFrame,
         row.historyMisses = history.misses();
         row.historyDurationUs = static_cast<uint64_t>(history.duration() / 1000);
         row.historyCanRelease = history.canRelease();
+        row.bufferStats = m_TimingController->intervalStats();
     }
     row.feedback = feedback;
     row.telemetry = telemetry;
@@ -1601,6 +1613,31 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     addUnsigned(0); // Retired oscillation diagnostic column.
     addUnsigned(0);
     addUnsigned(m_Config.allowTearing);
+    addUnsigned(decision.playoutDelayMaximumUs);
+    addUnsigned(decision.playoutQueueLimitUs);
+    addUnsigned(decision.playoutPresetCapUs);
+    addSigned(decision.playoutOffsetUs);
+    addUnsigned(decision.presentationFloorPushUs);
+    const auto& update = row.bufferStats.update;
+    // Stale/failed rows may precede the observer call. Never attribute the
+    // preceding frame's update to them, nor inspect worker state on producers.
+    addUnsigned(row.decisionValid && parameters.playoutResponsiveBuffer >= 6 &&
+                update.frame == static_cast<uint64_t>(row.frameNumber) && update.atUs != 0);
+    addUnsigned(update.atUs);
+    addUnsigned(update.frame);
+    addUnsigned(static_cast<uint64_t>(update.action));
+    addUnsigned(update.attributedFrame);
+    addUnsigned(update.beforeUs);
+    addUnsigned(update.requestedUs);
+    addUnsigned(update.intervalErrorUs);
+    addUnsigned(update.latenessUs);
+    addUnsigned(update.attemptedIncreaseUs);
+    addUnsigned(update.clippedIncreaseUs);
+    addUnsigned(update.holdRemainingUs);
+    addUnsigned(update.cooldownRemainingUs);
+    addBool(row.bufferStats.initialCalibrationComplete);
+    addUnsigned(row.bufferStats.calibrationSamples);
+    addUnsigned(row.bufferStats.calibrationCoverageUs);
     line.append('\n');
 
     if (m_TraceFormat == TraceFormat::ChunkedCompressed) {
@@ -1727,8 +1764,8 @@ const char* VrrPacingWorker::tearClassification(const TraceRow& row) const
 
 void VrrPacingWorker::openTraceIfRequested()
 {
-    const char* tracePath = SDL_getenv("MOONLIGHT_VRR_TRACE");
-    if (tracePath == nullptr || tracePath[0] == '\0') {
+    const QString tracePath = qEnvironmentVariable("MOONLIGHT_VRR_TRACE");
+    if (tracePath.isEmpty()) {
         return;
     }
 
@@ -1738,7 +1775,7 @@ void VrrPacingWorker::openTraceIfRequested()
     if (isUncPath(tracePath)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "MOONLIGHT_VRR_TRACE must use a local path; refusing network trace: %s",
-                    tracePath);
+                    qPrintable(tracePath));
         return;
     }
 
@@ -1748,7 +1785,7 @@ void VrrPacingWorker::openTraceIfRequested()
     // reconnect creates a new worker. Preserve the completed connection before
     // reusing that path so launchers and their latest-trace links still name
     // the current capture. A failed archive must never fall through to truncate.
-    QFile previousTrace(QString::fromLocal8Bit(tracePath));
+    QFile previousTrace(tracePath);
     if (previousTrace.exists()) {
         const QFileInfo traceInfo(previousTrace);
         const QString extension = traceInfo.suffix().isEmpty() ? QString() :
@@ -1763,7 +1800,7 @@ void VrrPacingWorker::openTraceIfRequested()
         if (!previousTrace.rename(archivePath)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Unable to preserve previous VRR trace; tracing disabled: %s",
-                        tracePath);
+                        qPrintable(tracePath));
             return;
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1774,22 +1811,22 @@ void VrrPacingWorker::openTraceIfRequested()
 #ifdef _WIN32
     // Use the checked CRT variant on Windows so enabling diagnostics does not
     // introduce a deprecation warning in the normal application build.
-    if (fopen_s(&m_TraceFile, tracePath, "wb") != 0) {
+    if (_wfopen_s(&m_TraceFile, reinterpret_cast<const wchar_t*>(tracePath.utf16()), L"wb") != 0) {
         m_TraceFile = nullptr;
     }
 #else
-    m_TraceFile = std::fopen(tracePath, "wb");
+    m_TraceFile = std::fopen(QFile::encodeName(tracePath).constData(), "wb");
 #endif
     if (m_TraceFile == nullptr) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to open MOONLIGHT_VRR_TRACE file: %s", tracePath);
+                    "Unable to open MOONLIGHT_VRR_TRACE file: %s", qPrintable(tracePath));
         return;
     }
 
     // A .csv suffix explicitly requests the directly readable compatibility
     // format. The recommended .vrrtrace format compresses independent chunks
     // and typically reduces a full session by an order of magnitude.
-    m_TraceFormat = QByteArray(tracePath).toLower().endsWith(".csv") ?
+    m_TraceFormat = tracePath.endsWith(QStringLiteral(".csv"), Qt::CaseInsensitive) ?
         TraceFormat::Csv : TraceFormat::ChunkedCompressed;
 
     // Amortize local diagnostic writes instead of flushing on every frame.

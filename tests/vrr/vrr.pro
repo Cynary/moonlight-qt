@@ -43,6 +43,7 @@ unix:!macx:packagesExist(wayland-server sdl2) {
 timingcontroller.file = $$PWD/timingcontroller.pro
 framelimitercapabilities.file = $$PWD/framelimitercapabilities.pro
 ratepolicy.file = $$PWD/ratepolicy.pro
+diagnostics.file = $$PWD/diagnostics.pro
 pacingworker.file = $$PWD/pacingworker.pro
 replay.file = $$PWD/replay.pro
 replayconfig.file = $$PWD/replayconfig.pro
@@ -51,6 +52,7 @@ queuesim.file = $$PWD/queuesim.pro
 SUBDIRS += \
     timingcontroller \
     ratepolicy \
+    diagnostics \
     framelimitercapabilities \
     pacingworker \
     replay \

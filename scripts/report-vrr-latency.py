@@ -25,6 +25,45 @@ SESSION_FIELDS = ("session_latency_mode", "session_readiness_hitch_feedback",
                   "session_latency_oscillation", "latency_test_phase",
                   "calibration_loaded", "initial_cached_samples", "history_version",
                   "stream_rate_hz", "display_refresh_hz", "playout_initial_profile")
+BUFFER_ACTIONS = ("learning", "sequence break", "late-work growth", "growth capped",
+                  "current error hold", "history hold", "clean-time hold", "releasing",
+                  "minimum", "work not absorbable", "growth cooldown", "no fresh late work", "limit changed")
+CLIENT_COSTS = ("handoff", "queue_residence", "decode_sync", "controller", "render_wait",
+                "preparation", "target_wait", "spacing_wait", "present_call", "other_worker")
+
+
+def client_costs(row):
+    """A non-overlapping partition on one denominator, or unavailable.
+
+    GPU readiness and acquisition are inside preparation. Wake overshoot is
+    inside the corresponding wait. Policy padding is not an execution stage.
+    """
+    keys = ("decoder_output_us", "pacer_arrival_us", "dequeue_us", "decision_us",
+            "decision_end_us", "render_wait_entry_us", "render_wait_final_us",
+            "prepare_start_us", "prepare_end_us", "target_wait_entry_us",
+            "target_wait_final_us", "present_start_us", "present_end_us")
+    times = [number(row, k) for k in keys]
+    if any(t is None or t <= 0 for t in times) or times != sorted(times):
+        return None
+    output, arrival, dequeue, decision, decision_end, render_entry, render_end, prep, prep_end, target, target_end, present, end = times
+    decode = number(row, "decode_sync_wait_us")
+    if decode is None or not 0 <= decode <= decision - dequeue:
+        return None
+    correction_start, correction_end = (number(row, k) for k in
+                                         ("correction_wait_start_us", "correction_wait_end_us"))
+    if correction_start is None or correction_end is None:
+        return None
+    if correction_start == correction_end == 0:
+        spacing = 0
+    elif target_end <= correction_start <= correction_end <= present:
+        spacing = correction_end - correction_start
+    else:
+        return None
+    costs = dict(zip(CLIENT_COSTS[:-1], (arrival - output, dequeue - arrival, decode,
+        decision_end - decision, render_end - render_entry, prep_end - prep,
+        target_end - target, spacing, end - present)))
+    costs["other_worker"] = end - output - sum(costs.values())
+    return costs if costs["other_worker"] >= 0 else None
 
 
 def number(row, key):
@@ -52,6 +91,12 @@ def summarize(source, path, phase_filter=None, parent=None):
         raise ValueError("missing or duplicate trace columns")
     digest = hashlib.sha256(header_bytes)
     metrics = defaultdict(lambda: array("q"))
+    cost_metrics = defaultdict(lambda: array("q"))
+    buffer_actions = Counter()
+    buffer_events = []
+    recent_frame_costs = {}
+    buffer_update_rows = 0
+    previous_policy = None
     invalid = Counter()
     outcomes = Counter()
     identities = set()
@@ -125,6 +170,59 @@ def summarize(source, path, phase_filter=None, parent=None):
         if number(row, "history_state_valid") == 1:
             history_rows += 1
             release_allowed += number(row, "history_can_release") == 1
+        if number(row, "decision_valid") == 1:
+            for key in ("requested_playout_delay_us", "buffer_cap_us", "buffer_queue_limit_us",
+                        "buffer_preset_cap_us", "cadence_smoothing_us", "presentation_floor_push_us",
+                        "render_lead_us", "gpu_readiness_lead_us", "render_wake_lead_us",
+                        "target_wake_lead_us", "guard_us", "render_wait_overshoot_us",
+                        "target_wait_overshoot_us", "controller_call_us"):
+                value = number(row, key)
+                if value is not None:
+                    metrics[key].append(value)
+            offset = number(row, "playout_offset_us")
+            if previous_policy is not None and offset is not None and not number(row, "rebased"):
+                metrics["source_mapping_change_us"].append(offset - previous_policy)
+            previous_policy = offset
+            target, original, floor = (number(row, k) for k in
+                                       ("target_us", "original_target_us", "presentation_floor_push_us"))
+            if None not in (target, original, floor) and target >= original + floor:
+                metrics["readiness_recovery_push_us"].append(target - original - floor)
+        frame_costs = client_costs(row) if number(row, "presented") == 1 else None
+        frame_id = number(row, "frame")
+        if frame_costs is not None:
+            recent_frame_costs[frame_id] = frame_costs
+            metrics["partitioned_client_processing_us"].append(sum(frame_costs.values()))
+            for key, value in frame_costs.items():
+                cost_metrics[key].append(value)
+            # Catch-up charges the preceding presented frame, not this frame.
+            while len(recent_frame_costs) > 2:
+                del recent_frame_costs[next(iter(recent_frame_costs))]
+        elif number(row, "presented") == 1:
+            invalid["client_cost_partition"] += 1
+        if number(row, "buffer_update_valid") == 1:
+            before, after, clipped, action, attributed, update_frame, update_at = (number(row, k) for k in
+                ("buffer_request_before_us", "buffer_request_after_us", "buffer_clipped_increase_us",
+                 "buffer_action", "buffer_attributed_frame", "buffer_update_frame", "buffer_update_at_us"))
+            if (None in (before, after, clipped, action, attributed, update_frame, update_at) or
+                    min(before, after, clipped) < 0 or not 0 <= action < len(BUFFER_ACTIONS) or
+                    update_frame != frame_id or update_at <= 0):
+                invalid["buffer_update"] += 1
+            else:
+                buffer_update_rows += 1
+                buffer_actions[BUFFER_ACTIONS[action]] += 1
+                if before != after or clipped:
+                    buffer_events.append({
+                        "frame": frame_id, "at_us": update_at, "attributed_frame": attributed,
+                        "action": BUFFER_ACTIONS[action], "request_before_us": before,
+                        "request_after_us": after, "change_us": after - before,
+                        "clipped_step_us": clipped,
+                        "interval_error_us": number(row, "buffer_interval_error_us"),
+                        "readiness_lateness_us": number(row, "buffer_lateness_us"),
+                        "initial_calibration_complete": number(row, "buffer_calibration_complete"),
+                        "calibration_intervals": number(row, "buffer_calibration_samples"),
+                        "calibration_coverage_us": number(row, "buffer_calibration_coverage_us"),
+                        "observed_client_costs_us": recent_frame_costs.get(attributed),
+                    })
         if number(row, "presented") != 1:
             # Terminal rows may be emitted out of arrival order. Frame identity
             # below, rather than their position here, breaks cadence across drops.
@@ -142,6 +240,7 @@ def summarize(source, path, phase_filter=None, parent=None):
                     metrics[key].append(value)
         for name, start, end in (
             ("assembly_us", "frame_receive_us", "frame_reassembled_us"),
+            ("decoder_queue_us", "frame_reassembled_us", "decode_submit_us"),
             ("decoder_submit_to_output_us", "decode_submit_us", "decoder_output_us"),
             ("queue_residence_us", "pacer_arrival_us", "dequeue_us"),
             ("output_to_submission_us", "decoder_output_us", "submission_boundary_us"),
@@ -149,6 +248,9 @@ def summarize(source, path, phase_filter=None, parent=None):
             ("ingress_to_present_return_us", "frame_receive_us", "present_end_us"),
         ):
             difference(row, name, start, end)
+        if (number(row, "gpu_ready_timing_valid") == 1 and
+                number(row, "gpu_ready_wait_result_valid") == 1 and number(row, "gpu_ready_wait_result") == 0):
+            difference(row, "gpu_render_ready_wait_us", "gpu_ready_wait_start_us", "gpu_ready_time_us")
         processing = difference(row, "client_processing_us", "decoder_output_us", "present_end_us")
         prep, call = number(row, "prepare_us"), number(row, "present_call_us")
         if processing is not None and prep is not None and call is not None and 0 <= prep + call <= processing:
@@ -220,6 +322,8 @@ def summarize(source, path, phase_filter=None, parent=None):
         warnings.append("Legacy capture lacks decoder output: overlay client-processing and queue/pacing latency are unavailable. Readiness latency is a different boundary.")
     if "session_latency_mode" not in columns:
         warnings.append("Preset inferred from captured cap; explicit preset metadata unavailable.")
+    if "buffer_update_valid" not in columns:
+        warnings.append("Legacy capture lacks buffer-decision reasons; measured costs do not establish why the controller grew or held reserve.")
     warnings.append("CPU submission cadence is not physical display smoothness; no end-to-end latency is measured.")
     jerk = metrics["submission_jerk_us"]
     sender = metrics["sender_spacing_error_us"]
@@ -234,6 +338,8 @@ def summarize(source, path, phase_filter=None, parent=None):
         "integrity": {"footer": footer, "decoded_hash_valid": hash_valid, "sequence_valid": sequence_valid,
                       "accounting_valid": accounting, "duplicate_sequences": duplicate_sequences},
         "metrics": {k: distribution(v) for k, v in sorted(metrics.items())}, "unavailable_or_invalid": dict(invalid),
+        "client_costs_us": {k: distribution(v) for k, v in cost_metrics.items()},
+        "buffer_updates": {"rows": buffer_update_rows, "actions": dict(buffer_actions), "events": buffer_events},
         "cadence": {"jerk_pairs": len(jerk), "jerk_over_2ms": sum(v > 2000 for v in jerk),
                     "jerk_over_2ms_percent": 100 * sum(v > 2000 for v in jerk) / len(jerk) if jerk else None,
                     "sender_pairs": len(sender), "sender_errors_over_3ms": sum(v > 3000 for v in sender),
@@ -301,14 +407,14 @@ def markdown(reports):
         value = report["metrics"].get(key, {}).get("mean")
         return "N/A" if value is None else f"{value / 1000:.3f}"
     lines = ["# Observed VRR latency", "", "One row per actual capture or oscillation phase; latency averages in milliseconds. No simulated presets.", "",
-             "| Preset | Frames | Client processing | Queue/pacing | Rendering | Padding | Jerk >2 ms |",
-             "|---|---:|---:|---:|---:|---:|---:|"]
+             "| Preset | Frames | Client total (diagnostic) | Queue/pacing | GPU decode wait | Rendering | Reserve | Jerk >2 ms |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in reports:
         jerk = r["cadence"]["jerk_over_2ms_percent"]
         text = "N/A" if jerk is None else f"{jerk:.2f}%"
         label = r['preset'] + (f" (phase {r['phase']})" if r['phase'] is not None else "")
         lines.append(f"| {label} | {r['presented']} | " + " | ".join(mean(r, k) for k in
-                     ("client_processing_us", "queue_pacing_us", "rendering_us", "playout_delay_us")) + f" | {text} |")
+                     ("client_processing_us", "queue_pacing_us", "decode_sync_wait_us", "rendering_us", "playout_delay_us")) + f" | {text} |")
     lines += ["", "Client processing runs from decoder output to present-call return. Queue/pacing excludes explicit GPU decode waiting; queue/pacing plus rendering plus that wait partitions the interval; padding is a controller budget, not another additive component.",
               "Submission jerk measures changes between adjacent submission intervals, including host variation. It does not establish physical display smoothness."]
     missing = set(MODES.values()) - {r["preset"] for r in reports}
@@ -318,6 +424,38 @@ def markdown(reports):
     for r in reports:
         lines += ["", f"## {Path(r['path']).name}", "", f"Complete capture: {r['complete_capture']}; duration: {r['duration_seconds']:.2f} s; jerk pairs: {r['cadence']['jerk_pairs']}; source stalls >25 ms: {r['cadence']['source_stalls_over_25ms']}.", ""]
         lines += ["- " + w for w in r["warnings"]]
+        lines += ["", "Execution cost (ms). Only frames with complete, ordered stage timestamps are included. Stage means sum to the partitioned total below; percentile columns do not add.", "",
+                  "| Stage | Samples | Mean | p95 | p99 |", "|---|---:|---:|---:|---:|"]
+        for key in CLIENT_COSTS:
+            d = r["client_costs_us"].get(key, {})
+            values = ["N/A" if d.get(k) is None else f"{d[k] / 1000:.3f}" for k in ("mean", "p95", "p99")]
+            lines.append(f"| {key.replace('_', ' ')} | {d.get('count', 0)} | " + " | ".join(values) + " |")
+        d = r["metrics"].get("partitioned_client_processing_us", {})
+        values = ["N/A" if d.get(k) is None else f"{d[k] / 1000:.3f}" for k in ("mean", "p95", "p99")]
+        lines.append(f"| Partitioned total | {d.get('count', 0)} | " + " | ".join(values) + " |")
+        lines += ["", "Upstream costs, preparation details, and policy offsets (ms). These overlap the stage table or lie outside it; do not add them to client time.", "",
+                  "| Measurement | Mean | p95 | p99 |", "|---|---:|---:|---:|"]
+        for key in ("assembly_us", "decoder_queue_us", "decoder_submit_to_output_us",
+                    "prepare_decode_sync_us", "prepare_acquire_us", "prepare_render_us", "prepare_flush_us",
+                    "gpu_render_ready_wait_us", "playout_delay_us", "requested_playout_delay_us", "buffer_cap_us",
+                    "buffer_preset_cap_us", "buffer_queue_limit_us", "cadence_smoothing_us",
+                    "source_mapping_change_us", "readiness_recovery_push_us", "presentation_floor_push_us",
+                    "render_lead_us", "gpu_readiness_lead_us", "render_wait_overshoot_us", "target_wait_overshoot_us"):
+            d = r["metrics"].get(key, {})
+            values = ["N/A" if d.get(k) is None else f"{d[k] / 1000:.3f}" for k in ("mean", "p95", "p99")]
+            lines.append(f"| {key} | " + " | ".join(values) + " |")
+        updates = r["buffer_updates"]
+        actions = "; ".join(f"{key}: {value}" for key, value in updates["actions"].items())
+        lines += ["", f"Buffer decisions: {updates['rows']} recorded." + (f" {actions}." if actions else ""),
+                  "Requests affect subsequent frames. A clipped step is rejected growth, not applied latency. Attribution identifies late readiness; stage timings alone do not isolate a hardware or network cause."]
+        if updates["events"]:
+            lines += ["", "Latest 20 request changes or capped attempts (all events and associated frame costs are in JSON):", "",
+                      "| Frame | Charged frame | Reason | Request before/after ms | Change ms | Rejected ms |",
+                      "|---:|---:|---|---:|---:|---:|"]
+            for event in updates["events"][-20:]:
+                lines.append(f"| {event['frame']} | {event['attributed_frame']} | {event['action']} | "
+                             f"{event['request_before_us']/1000:.3f}/{event['request_after_us']/1000:.3f} | "
+                             f"{event['change_us']/1000:+.3f} | {event['clipped_step_us']/1000:.3f} |")
     return "\n".join(lines) + "\n"
 
 
@@ -329,7 +467,7 @@ def main():
     args = parser.parse_args()
     try:
         reports = [analyze(path) for path in args.captures]
-        result = json.dumps({"report_schema": 1, "kind": "observed-captures", "captures": reports}, indent=2)
+        result = json.dumps({"report_schema": 2, "kind": "observed-captures", "captures": reports}, indent=2)
         if args.output:
             args.output.write_text(result + "\n")
         if args.markdown:

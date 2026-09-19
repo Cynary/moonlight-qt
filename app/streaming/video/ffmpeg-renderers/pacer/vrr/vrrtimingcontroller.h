@@ -36,6 +36,9 @@
     X(uint64_t, playout_gpu_readiness_maximum_us, playoutGpuReadinessMaximumUs, 12000) \
     X(uint64_t, playout_prediction_only, playoutPredictionOnly, 0) \
     X(uint64_t, playout_responsive_buffer, playoutResponsiveBuffer, 0) \
+    /* Historical captures retain the one-second/two-interval warmup. */ \
+    X(uint64_t, playout_interval_initial_warmup_us, playoutIntervalInitialWarmupUs, 1000000) \
+    X(size_t, playout_interval_initial_minimum_samples, playoutIntervalInitialMinimumSamples, 2) \
     X(uint64_t, playout_mean_miss_hold_us, playoutMeanMissHoldUs, 4000000) \
     X(uint64_t, playout_mean_miss_release_us_per_second, playoutMeanMissReleaseUsPerSecond, 200) \
     X(uint64_t, playout_on_time_target_per_million, playoutOnTimeTargetPerMillion, 990000) \
@@ -234,6 +237,12 @@ struct VrrTimingDecision {
     // The source playout delay this target was built with: the adaptive
     // per-band delay under timestamp playout, else the fixed parameter.
     uint64_t playoutDelayUs = 0;
+    // Independent limits, sampled with the target. These are budgets, not
+    // additional measured latency to add to queue residence or render time.
+    uint64_t playoutDelayMaximumUs = 0;
+    uint64_t playoutQueueLimitUs = 0;
+    uint64_t playoutPresetCapUs = 0;
+    int64_t playoutOffsetUs = 0;
     // Cadence smoothing: how far this target was moved from its raw mapped
     // slot (positive = later) to keep presented intervals even. Under the
     // metronome this is the schedule's lag behind the mapped sender clock;

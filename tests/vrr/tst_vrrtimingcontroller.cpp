@@ -2765,7 +2765,7 @@ void testProductionAdaptiveProtectionRecoversWithoutDrift()
 {
     const auto session = config(120, 120);
     const auto policy = vrrTimingParametersForSession(session);
-    expect(policy.playoutAdaptiveOnly == 0 && policy.playoutPerFrameLatch == 2 &&
+    expect(policy.playoutAdaptiveOnly == 0 && policy.playoutPerFrameLatch == 1 &&
            policy.playoutRateProtectionEnabled == 0,
            "production must choose protection for each slot, not force a rate band");
     VrrTimingController controller(session, true, policy);
@@ -2805,7 +2805,8 @@ void testPerFrameLatchIncludesSafetyHeadroom()
             auto session = config(refresh * 3 / 4, refresh);
             session.latencyMode = mode;
             session.smoothFrameTiming = false;
-            const auto policy = vrrTimingParametersForSession(session);
+            auto policy = vrrTimingParametersForSession(session);
+            policy.playoutPerFrameLatch = 2; // Preserve historical vrr17 replay.
             // A shadow schedule supplies the uncompressed source slots. No
             // preparation observations means both controllers retain the same
             // render budget and buffer; only submitted spacing differs.
@@ -2844,7 +2845,7 @@ void testPerFrameLatchIncludesSafetyHeadroom()
     }
 }
 
-void testProductionNearRefreshSafetyMargin()
+void testProductionMatchesVrr14NearRefresh()
 {
     for (int mode : {0, 1, 2}) {
         auto session = config(116, 120);
@@ -2852,7 +2853,7 @@ void testProductionNearRefreshSafetyMargin()
         session.smoothFrameTiming = false;
         const auto policy = vrrTimingParametersForSession(session);
         auto historical = policy;
-        historical.playoutPerFrameLatch = 1;
+        historical.playoutPerFrameLatch = 2;
         VrrTimingController controller(session, true, policy);
         VrrTimingController oldController(session, true, historical);
         unsigned protectedFrames = 0, oldProtectedFrames = 0;
@@ -2867,12 +2868,12 @@ void testProductionNearRefreshSafetyMargin()
                 oldProtectedFrames += old.latchedPresentation;
             }
             expect(d.targetUs == old.targetUs && d.playoutDelayUs == old.playoutDelayUs,
-                   "restoring protection must preserve VRR16's queue and planned deadlines");
+                   "vrr14-style protection must not add buffer or retime source slots");
             controller.noteSubmission(true, false, d.targetUs);
             oldController.noteSubmission(true, false, old.targetUs);
         }
-        expect(protectedFrames == 499 && oldProtectedFrames == 0,
-               "116/120 must regain protection while explicit VRR16 replay preserves its original decision");
+        expect(protectedFrames == 0 && oldProtectedFrames == 499,
+               "116/120 must match vrr14 while explicit vrr17 replay retains safety-headroom protection");
     }
 }
 
@@ -2892,10 +2893,9 @@ void testPersistentImmediateUsesSafetyFloor()
                 expect(!d.latchedPresentation,
                        "persistent Immediate/FIFO must never request unsupported native protection");
                 if (prior) {
-                    const auto safe = prior + controller.displayPeriodUs() + d.guardUs +
-                        policy.latchedPresentationHeadroomUs;
+                    const auto safe = prior + controller.displayPeriodUs() + d.guardUs;
                     expect(controller.earliestSubmissionUs() == safe && d.targetUs >= safe,
-                           "an immutable unprotected backend must enforce safety headroom through its software floor");
+                           "production Immediate/FIFO must retain vrr14's period-plus-guard software floor");
                 }
                 prior = d.targetUs + (i % 37 == 0 ? 3000 : 0);
                 controller.noteSubmission(true, false, prior);
@@ -4027,8 +4027,8 @@ void testProductionPreservesRelativeGameSpacing()
     auto policy = vrrTimingParametersForSession(session);
     expect(policy.playoutDelayMaximumUs == 24000 &&
                policy.playoutDelayMaximumPeriodPerMille == 0 &&
-               policy.playoutDelayCapSourcePeriodPerMille == 3000,
-           "production Smooth must allow three source frames up to 24 ms");
+               policy.playoutDelayCapSourcePeriodPerMille == 4000,
+           "production Smooth must allow four source frames up to 24 ms");
     // Hold padding constant to isolate the spacing contract from adaptation.
     policy.playoutDelayMaximumPeriodPerMille = 0;
     policy.playoutDelayCapSourcePeriodPerMille = 0;
@@ -4290,14 +4290,14 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
         const auto ordinaryPolicy = vrrTimingParametersForSession(ordinarySession);
         expect(ordinaryPolicy.latencyFixEnabled == 0 &&
                    ordinaryPolicy.latencyFixAllRates == 0 &&
-                   ordinaryPolicy.playoutDelayCapSourcePeriodPerMille == 3000 &&
+                   ordinaryPolicy.playoutDelayCapSourcePeriodPerMille == 4000 &&
                    ordinaryPolicy.playoutDelayMaximumUs == 24000,
-               "Smooth must cap adaptive buffering at three source frames");
+               "Smooth must allow four source frames within its absolute and capacity limits");
         for (int mode : {1, 2}) {
             auto session = ordinarySession;
             session.latencyMode = mode;
             const auto policy = vrrTimingParametersForSession(session);
-            const uint64_t capPerMille = mode == 1 ? 1000 : 500;
+            const uint64_t capPerMille = 2000;
             expect(policy.latencyFixEnabled == 1 && policy.latencyFixAllRates == 1 &&
                        policy.latencyFixDelayPeriodPerMille == (mode == 1 ? 500 : 0) &&
                        policy.playoutDelayCapSourcePeriodPerMille == capPerMille,
@@ -4320,7 +4320,7 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
                     const auto b = recorded.schedule(frame(i, rtp, validRtp, decoded),
                         std::max(decoded, recorded.lastSubmissionUs()));
                     const uint64_t ordinaryLimit =
-                        ordinary.sourcePeriodUs() * 3000 / 1000;
+                        ordinary.sourcePeriodUs() * 4000 / 1000;
                     expect(a.targetUs == b.targetUs && a.originalTargetUs == b.originalTargetUs &&
                                a.renderStartUs == b.renderStartUs &&
                                a.playoutDelayUs == b.playoutDelayUs &&
@@ -4329,7 +4329,7 @@ void testLatencyPresetsAcrossSourceAndDisplayRates()
                            "Smooth and its recorded policy must retain identical decisions through late and invalid-RTP frames");
                     expect(a.playoutDelayUs <= ordinaryLimit &&
                                ordinary.playoutDelayUs() <= ordinaryLimit,
-                           "Smooth padding must stay within three fitted source frames");
+                           "Smooth padding must stay within four fitted source frames");
                     const auto now = std::max(decoded, selected.lastSubmissionUs());
                     const auto decision = selected.schedule(frame(i, rtp, validRtp, decoded), now);
                     const uint64_t limit =
@@ -4365,7 +4365,7 @@ void testLatencyPresetsBoundHitchesThroughCadenceChanges()
         selectedSession.latencyMode = mode;
         VrrTimingController ordinary(ordinarySession, true, vrrTimingParametersForSession(ordinarySession));
         VrrTimingController selected(selectedSession, true, vrrTimingParametersForSession(selectedSession));
-        const uint64_t capPerMille = mode == 1 ? 1000 : 500;
+        const uint64_t capPerMille = 2000;
         uint64_t ordinaryBeforeHitches = 0;
         uint64_t ordinaryMaximum = 0;
         double ticks = 0;
@@ -4496,6 +4496,8 @@ void testResponsiveBufferRecoveryAndDesktopCadence()
         // has explicit, longer retention tested separately below.
         policy.playoutResponsiveBuffer = 2;
         policy.playoutDelayMaximumUs = 16000;
+        policy.playoutDelayCapSourcePeriodPerMille = mode == 0 ? 3000 : mode == 1 ? 1000 : 500;
+        policy.playoutPerFrameLatch = 2;
         expect(policy.playoutResponsiveBuffer == 2 && policy.playoutDelayMarginUs == 500,
                "live policy must select recent readiness rather than the five-minute tail");
         VrrTimingController controller(session, true, policy);
@@ -4753,8 +4755,175 @@ void testIntervalQualityUsesPresetHistory()
            "the active quality score must retain the selected preset history duration");
 }
 
+void testProductionCalibrationSurvivesFpsChanges()
+{
+    for (int mode : {0, 1, 2}) for (bool smoothing : {false, true}) {
+        auto session = config(120, 120);
+        session.latencyMode = mode;
+        session.smoothFrameTiming = smoothing;
+        const auto policy = vrrTimingParametersForSession(session);
+        VrrTimingController controller(session, true, policy);
+        uint64_t sourceTicks = 0, submitted = 0, initialBuffer = 0, previousBuffer = 0;
+        int frameNumber = 0;
+        bool calibrated = false;
+        for (int rate : {120, 19, 120, 30, 99, 116, 60, 120}) {
+            for (int i = 0; i < rate * 2; ++i, ++frameNumber) {
+                sourceTicks += uint64_t((i + 1) * 90000 / rate - i * 90000 / rate);
+                const auto arrival = decodedTimeForRtp(1000000, uint32_t(sourceTicks));
+                const auto now = std::max(arrival, submitted);
+                const auto decision = controller.schedule(frame(frameNumber, uint32_t(sourceTicks), true, arrival), now);
+                if (!initialBuffer) initialBuffer = decision.playoutDelayUs;
+                const auto ready = std::max(now, decision.renderStartUs) + 1000;
+                submitted = std::max(ready, decision.targetUs);
+                controller.notePreparationDuration(1000, 0, ready);
+                controller.noteSchedulerDelays(0, 0, true);
+                controller.noteSubmission(true, false, submitted);
+                const auto stats = controller.intervalStats();
+                expect(!calibrated || stats.initialCalibrationComplete,
+                       "FPS/menu transitions must not restart initial calibration");
+                calibrated |= stats.initialCalibrationComplete;
+                expect(decision.playoutDelayUs <= initialBuffer &&
+                           decision.playoutDelayUs <= policy.playoutDelayMaximumUs,
+                       "clean FPS/menu transitions must not inflate startup padding or the absolute ceiling");
+                expect(!previousBuffer || decision.playoutDelayUs <= previousBuffer + 125,
+                       "calibration and rate transitions must retain the normal application slew");
+                previousBuffer = decision.playoutDelayUs;
+            }
+        }
+        expect(calibrated, "the production rate-transition fixture must finish initial calibration");
+    }
+}
+
+void testInitialIntervalCalibration()
+{
+    using Buffer = Vrr13::IntervalBuffer;
+    for (int rate : {20, 30, 60, 116, 240}) {
+        Buffer faster, historical;
+        uint64_t firstQualified = 0;
+        for (uint64_t i = 1; i <= 2 * uint64_t(rate); ++i) {
+            const uint64_t at = 1000000 + i * 1000000 / rate;
+            const Buffer::Sample sample{i, at, at + 1000, at + 1000, at + 1000, 4000, true, true};
+            faster.observe(sample, 1000, 16000, 6000000, 125, true, 990000, 500, 60000000, 500000, 32);
+            historical.observe(sample, 1000, 16000, 6000000, 125, true, 990000, 500, 60000000);
+            if (faster.stats().averageValid && !firstQualified) {
+                firstQualified = at;
+                expect(faster.stats().calibrationCoverageUs >= 500000 &&
+                           faster.stats().calibrationSamples >= 32,
+                       "initial calibration needs both elapsed evidence and enough consecutive intervals");
+                if (rate >= 60) expect(!historical.stats().averageValid,
+                    "high-rate initial calibration must qualify before the historical one-second window");
+            }
+            expect(faster.demand(4000) == 4000,
+                   "faster calibration must not inflate a clean cold-start reserve");
+        }
+        expect(firstQualified != 0, "low-FPS calibration must complete even with fewer than 32 intervals per second");
+        faster.breakSequence();
+        for (uint64_t i = 1; i <= 2 * uint64_t(rate); ++i) {
+            const uint64_t at = 5000000 + i * 1000000 / rate;
+            faster.observe({i, at, at + 1000, at + 1000, at + 1000, 4000, true, true},
+                1000, 16000, 6000000, 125, true, 990000, 500, 60000000, 500000, 32);
+            if (faster.stats().calibrationCoverageUs < 1000000)
+                expect(!faster.stats().averageValid,
+                       "phase/FPS breaks must not rearm the shorter initial calibration");
+            expect(faster.stats().initialCalibrationComplete,
+                   "a timing break must preserve completed initial calibration");
+        }
+        faster.reset();
+        expect(!faster.stats().initialCalibrationComplete, "a new session must collect its own evidence");
+    }
+
+    Buffer variable;
+    uint64_t intended = 1000000;
+    for (uint64_t i = 1; i < 3000; ++i) {
+        // Deliberate source variation, including menu-like slow frames, is
+        // not client-added interval error or evidence for more buffering.
+        intended += i % 37 == 0 ? 52632 : i % 3 == 0 ? 16667 : 8621;
+        variable.observe({i, intended, intended + 1000, intended + 1000, intended + 1000,
+            4000, true, true}, 1000, 16000, 6000000, 125, true, 990000, 500, 60000000, 500000, 32);
+        expect(variable.demand(4000) <= 4000 && variable.stats().lastGrowthAtUs == 0,
+               "changing FPS alone must not grow reserve during or after calibration");
+    }
+
+    Buffer pressure;
+    uint64_t applied = 1000, lastGrowth = 0;
+    unsigned growths = 0;
+    for (uint64_t i = 1; i <= 500; ++i) {
+        const uint64_t at = 1000000 + i * 10000;
+        const uint64_t late = i % 2 ? 3000 : 0;
+        pressure.observe({i, at, at + late, at, at + late, applied, true, true},
+            1000, 16000, 6000000, 125, true, 990000, 500, 60000000, 500000, 32);
+        const auto update = pressure.stats().update;
+        if (update.requestedUs > applied) {
+            expect(update.requestedUs - applied <= 250 &&
+                       (!lastGrowth || update.atUs - lastGrowth >= 250000),
+                   "initial calibration must not increase the steady-state attack rate");
+            lastGrowth = update.atUs;
+            ++growths;
+        }
+        applied = pressure.demand(applied);
+    }
+    expect(growths > 2, "the bounded-attack test must actually exercise growth");
+}
+
+void testBufferDecisionDiagnostics()
+{
+    Vrr13::IntervalBuffer buffer;
+    bool sawCatchupGrowth = false, sawClippedGrowth = false, sawHistoryHold = false;
+    uint64_t applied = 1000;
+    for (uint64_t i = 1; i <= 700; ++i) {
+        const uint64_t intended = 1000000 + i * 10000;
+        const uint64_t late = i < 500 && i % 2 ? 3000 : 0;
+        buffer.observe({i, intended, intended + late, intended, intended + late,
+                        applied, true, true}, 1000, 1250, 6000000, 125, true, 990000);
+        const auto stats = buffer.stats();
+        const auto& update = stats.update;
+        applied = buffer.demand(applied);
+        expect(update.frame == i && update.requestedUs == applied && applied <= 1250,
+               "buffer diagnostics must describe this outcome without retaining rejected demand");
+        if (update.requestedUs > update.beforeUs && late == 0) {
+            sawCatchupGrowth = true;
+            expect(update.attributedFrame == i - 1 && update.latenessUs == 3000,
+                   "catch-up growth must identify the preceding late frame");
+        }
+        if (update.clippedIncreaseUs) {
+            sawClippedGrowth = true;
+            expect(update.action == Vrr13::IntervalBuffer::Action::Capped &&
+                   update.requestedUs == 1250 && stats.lastClippedAtUs == update.atUs,
+                   "a cap must expose the rejected step even when applied demand cannot grow");
+        }
+        sawHistoryHold |= update.action == Vrr13::IntervalBuffer::Action::HistoryHold;
+    }
+    expect(sawCatchupGrowth && sawClippedGrowth && sawHistoryHold,
+           "diagnostics must distinguish growth, saturation and old-score retention");
+    buffer.observe({701, 8010000, 8010000, 8010000, 8010000, applied, true, true},
+                   1000, 1000, 6000000, 125, true, 990000);
+    expect(buffer.stats().update.beforeUs == 1250 && buffer.stats().update.requestedUs == 1000 &&
+               buffer.stats().update.action == Vrr13::IntervalBuffer::Action::LimitChange,
+           "a changing capacity or preset limit must not masquerade as ordinary release");
+    buffer.breakSequence();
+    expect(buffer.stats().update.frame == 0 && buffer.stats().lastGrowthUs == 250,
+           "a broken sequence must invalidate the current cause but retain the last growth event");
+
+    for (bool absorbable : {false, true}) {
+        Vrr13::IntervalBuffer onTime;
+        for (uint64_t i = 1; i <= 200; ++i) {
+            const auto intended = 1000000 + i * 10000;
+            onTime.observe({i, intended, intended + (i % 2 ? 3000 : 0),
+                intended, intended, 1000, true, absorbable},
+                1000, 4000, 6000000, 125, true, 990000);
+        }
+        expect(onTime.demand(1000) == 1000 && onTime.stats().update.action ==
+            (absorbable ? Vrr13::IntervalBuffer::Action::NoFreshMiss :
+                          Vrr13::IntervalBuffer::Action::NotAbsorbable),
+            "native blocking or non-absorbable work must have an explicit no-growth reason");
+    }
+}
+
 int main()
 {
+    testProductionCalibrationSurvivesFpsChanges();
+    testInitialIntervalCalibration();
+    testBufferDecisionDiagnostics();
     testIntervalQualityBuffer();
     testIntervalQualityUsesPresetHistory();
     testPresetIntervalTolerances();
@@ -4790,7 +4959,7 @@ int main()
     testExplicitAdaptiveOnlyPolicy();
     testProductionAdaptiveProtectionRecoversWithoutDrift();
     testPerFrameLatchIncludesSafetyHeadroom();
-    testProductionNearRefreshSafetyMargin();
+    testProductionMatchesVrr14NearRefresh();
     testPersistentImmediateUsesSafetyFloor();
     testSourceRateProtection();
     testRollingPlayoutHistory();

@@ -32,6 +32,10 @@ typedef struct _VIDEO_STATS {
     uint64_t vrrQueueResidenceUs;
     uint64_t vrrDecodeWaitUs;
     uint64_t vrrBufferUs;
+    uint64_t vrrPreparationUs, vrrPresentCallUs, vrrGpuReadyWaitUs;
+    uint64_t vrrGpuReadyWaitFrames;
+    uint64_t vrrPresentedFrames, vrrQueuePacingUs;
+    uint64_t vrrLatchedFrames;
     uint64_t vrrMotionPairs;
     uint64_t vrrMotionHitches;
     uint64_t vrrCadenceIntervals;
@@ -58,6 +62,7 @@ typedef struct _VIDEO_STATS {
     uint64_t vrrTargetWakeLeadUs;
     uint64_t vrrGuardUs;
     uint64_t vrrSourcePeriodUs;
+    uint64_t vrrAppliedBufferUs, vrrBufferCapUs, vrrGpuReadinessLeadUs;
     uint16_t minHostProcessingLatency;         // low-res from RTP
     uint16_t maxHostProcessingLatency;         // low-res from RTP
     uint32_t totalHostProcessingLatency;       // low-res from RTP

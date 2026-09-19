@@ -872,6 +872,13 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
     dst.vrrQueueResidenceUs += src.vrrQueueResidenceUs;
     dst.vrrDecodeWaitUs += src.vrrDecodeWaitUs;
     dst.vrrBufferUs += src.vrrBufferUs;
+    dst.vrrPreparationUs += src.vrrPreparationUs;
+    dst.vrrPresentCallUs += src.vrrPresentCallUs;
+    dst.vrrGpuReadyWaitUs += src.vrrGpuReadyWaitUs;
+    dst.vrrGpuReadyWaitFrames += src.vrrGpuReadyWaitFrames;
+    dst.vrrPresentedFrames += src.vrrPresentedFrames;
+    dst.vrrQueuePacingUs += src.vrrQueuePacingUs;
+    dst.vrrLatchedFrames += src.vrrLatchedFrames;
     dst.vrrMotionPairs += src.vrrMotionPairs;
     dst.vrrMotionHitches += src.vrrMotionHitches;
     dst.vrrCadenceIntervals += src.vrrCadenceIntervals;
@@ -901,6 +908,9 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
         dst.vrrTargetWakeLeadUs = src.vrrTargetWakeLeadUs;
         dst.vrrGuardUs = src.vrrGuardUs;
         dst.vrrSourcePeriodUs = src.vrrSourcePeriodUs;
+        dst.vrrAppliedBufferUs = src.vrrAppliedBufferUs;
+        dst.vrrBufferCapUs = src.vrrBufferCapUs;
+        dst.vrrGpuReadinessLeadUs = src.vrrGpuReadinessLeadUs;
         dst.vrrPrepareLatenessP50Us = src.vrrPrepareLatenessP50Us;
         dst.vrrPrepareLatenessP95Us = src.vrrPrepareLatenessP95Us;
         dst.vrrPrepareLatenessP99Us = src.vrrPrepareLatenessP99Us;
@@ -1003,6 +1013,20 @@ void FFmpegVideoDecoder::syncPacerTelemetry()
         delta(snapshot.vrrDecodeWaitUs, m_LastPacerTelemetry.vrrDecodeWaitUs);
     m_ActiveWndVideoStats.vrrBufferUs +=
         delta(snapshot.vrrBufferUs, m_LastPacerTelemetry.vrrBufferUs);
+    m_ActiveWndVideoStats.vrrPreparationUs +=
+        delta(snapshot.vrrPreparationUs, m_LastPacerTelemetry.vrrPreparationUs);
+    m_ActiveWndVideoStats.vrrPresentCallUs +=
+        delta(snapshot.vrrPresentCallUs, m_LastPacerTelemetry.vrrPresentCallUs);
+    m_ActiveWndVideoStats.vrrGpuReadyWaitUs +=
+        delta(snapshot.vrrGpuReadyWaitUs, m_LastPacerTelemetry.vrrGpuReadyWaitUs);
+    m_ActiveWndVideoStats.vrrGpuReadyWaitFrames +=
+        delta(snapshot.vrrGpuReadyWaitFrames, m_LastPacerTelemetry.vrrGpuReadyWaitFrames);
+    m_ActiveWndVideoStats.vrrPresentedFrames +=
+        delta(snapshot.vrrPresentedFrames, m_LastPacerTelemetry.vrrPresentedFrames);
+    m_ActiveWndVideoStats.vrrQueuePacingUs +=
+        delta(snapshot.vrrQueuePacingUs, m_LastPacerTelemetry.vrrQueuePacingUs);
+    m_ActiveWndVideoStats.vrrLatchedFrames +=
+        delta(snapshot.vrrLatchedFrames, m_LastPacerTelemetry.vrrLatchedFrames);
     m_ActiveWndVideoStats.vrrMotionPairs +=
         delta(snapshot.vrrMotionPairs, m_LastPacerTelemetry.vrrMotionPairs);
     m_ActiveWndVideoStats.vrrMotionHitches +=
@@ -1042,6 +1066,9 @@ void FFmpegVideoDecoder::syncPacerTelemetry()
             snapshot.vrrTargetWakeLeadUs;
         m_ActiveWndVideoStats.vrrGuardUs = snapshot.vrrGuardUs;
         m_ActiveWndVideoStats.vrrSourcePeriodUs = snapshot.vrrSourcePeriodUs;
+        m_ActiveWndVideoStats.vrrAppliedBufferUs = snapshot.vrrAppliedBufferUs;
+        m_ActiveWndVideoStats.vrrBufferCapUs = snapshot.vrrBufferCapUs;
+        m_ActiveWndVideoStats.vrrGpuReadinessLeadUs = snapshot.vrrGpuReadinessLeadUs;
         m_ActiveWndVideoStats.vrrPrepareLatenessP50Us =
             snapshot.vrrPrepareLatenessP50Us;
         m_ActiveWndVideoStats.vrrPrepareLatenessP95Us =
@@ -1225,7 +1252,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         ret = snprintf(&output[offset],
                        length - offset,
                        "Frames dropped by your network connection: %.2f%%\n"
-                       "Frames dropped due to network jitter: %.2f%%\n"
+                       "Frames dropped by client pacing: %.2f%%\n"
                        "Average network latency: %s\n"
                        "Average decoding time: %.2f ms\n"
                        "Average frame queue delay: %.2f ms\n"
@@ -1292,7 +1319,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     snprintf(average, sizeof(average), "%.3f ms", interval.averageErrorUs / 1000.0);
                 else snprintf(average, sizeof(average), "collecting");
                 ret = snprintf(&output[offset], length - offset,
-                    "VRR pacing: %s | Smoothness (%s): %s / %.2f%% target%s\n"
+                    "VRR pacing: %s | Client timing quality (%s): %s / %.2f%% target%s\n"
                     "Client interval error (1s): %s | Tolerance: %.2f ms | Dropped (30s): %llu\n",
                     stats.vrrTelemetryActive ? "Active" : "Inactive",
                     scoreWindow, score,
@@ -1331,6 +1358,62 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         }
 
         offset += ret;
+
+        if (stats.vrrStateSequence && stats.vrrReadiness.intervalPolicy) {
+            const auto& interval = stats.vrrReadiness.interval;
+            const auto& update = interval.update;
+            char growth[64], clipped[64];
+            const auto describeEvent = [&](char* text, size_t size, uint64_t atUs, uint64_t costUs) {
+                if (atUs && stats.vrrReadiness.atUs >= atUs)
+                    snprintf(text, size, "%.3f ms (%.1f s ago)", costUs / 1000.0,
+                        (stats.vrrReadiness.atUs - atUs) / 1000000.0);
+                else snprintf(text, size, "none");
+            };
+            describeEvent(growth, sizeof(growth), interval.lastGrowthAtUs, interval.lastGrowthUs);
+            describeEvent(clipped, sizeof(clipped), interval.lastClippedAtUs, interval.lastClippedUs);
+            ret = snprintf(&output[offset], length - offset,
+                "Buffer reserve: %.2f / %.2f ms | Request: %.2f ms | %s\n"
+                "Last growth: %s | Last capped step: %s | Hold: %.1f s\n"
+                "Calibration: %s | Evidence: %.2f s, %llu intervals\n",
+                stats.vrrAppliedBufferUs / 1000.0, stats.vrrBufferCapUs / 1000.0,
+                update.requestedUs / 1000.0, Vrr13::IntervalBuffer::actionName(update.action),
+                growth, clipped, update.holdRemainingUs / 1000000.0,
+                interval.averageValid ? "ready" : interval.initialCalibrationComplete ? "requalifying" : "collecting",
+                interval.calibrationCoverageUs / 1000000.0,
+                static_cast<unsigned long long>(interval.calibrationSamples));
+            if (ret < 0 || ret >= length - offset) { SDL_assert(false); return; }
+            offset += ret;
+        }
+        if (stats.vrrPresentedFrames) {
+            const double divisor = stats.vrrPresentedFrames * 1000.0;
+            const uint64_t residence = std::min(stats.vrrQueueResidenceUs, stats.vrrQueuePacingUs);
+            char gpuReady[80];
+            if (stats.vrrGpuReadyWaitFrames) {
+                snprintf(gpuReady, sizeof(gpuReady), "%.2f ms (%.0f%% measured)",
+                    stats.vrrGpuReadyWaitUs / (stats.vrrGpuReadyWaitFrames * 1000.0),
+                    stats.vrrGpuReadyWaitFrames * 100.0 / stats.vrrPresentedFrames);
+            }
+            else snprintf(gpuReady, sizeof(gpuReady), "N/A");
+            ret = snprintf(&output[offset], length - offset,
+                "GPU decode synchronization wait: %.2f ms\n"
+                "Queue breakdown: residence %.2f ms | pacing/other %.2f ms\n"
+                "Preparation: %.2f ms | GPU ready wait (included): %s | Present call: %.2f ms\n"
+                "GPU preparation head start: %.2f ms | Protected submissions: %.1f%%\n",
+                stats.vrrDecodeWaitUs / divisor,
+                residence / divisor, (stats.vrrQueuePacingUs - residence) / divisor,
+                stats.vrrPreparationUs / divisor, gpuReady,
+                stats.vrrPresentCallUs / divisor, stats.vrrGpuReadinessLeadUs / 1000.0,
+                stats.vrrLatchedFrames * 100.0 / stats.vrrPresentedFrames);
+            if (ret < 0 || ret >= length - offset) { SDL_assert(false); return; }
+            offset += ret;
+        }
+        if (stats.vrrMotionPairs) {
+            ret = snprintf(&output[offset], length - offset,
+                "Submission jerk >2 ms: %.2f%% (includes host cadence)\n",
+                stats.vrrMotionHitches * 100.0 / stats.vrrMotionPairs);
+            if (ret < 0 || ret >= length - offset) { SDL_assert(false); return; }
+            offset += ret;
+        }
     }
 }
 
@@ -1338,7 +1421,7 @@ void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0 ||
             stats.vrrTelemetryActive) {
-        char videoStatsStr[2048];
+        char videoStatsStr[4096];
         stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2446,7 +2529,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
             addVideoStats(m_LastWndVideoStats, lastTwoWndStats);
             addVideoStats(m_ActiveWndVideoStats, lastTwoWndStats);
 
-            char text[2048];
+            char text[4096];
             stringifyVideoStats(lastTwoWndStats, text, sizeof(text));
             Session::get()->getOverlayManager().updateOverlayText(Overlay::OverlayDebug, text);
         }

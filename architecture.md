@@ -5,15 +5,28 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Source baseline: `fb8bf9e7` plus only the D3D11 4K binding eligibility change
-(2026-09-17). Single-device streams at least 3840x2160 bind instead of copying
+Source baseline: `1ccefb6e` (vrr17.1), plus the buffer-accounting review and
+initial-calibration follow-up (2026-09-18). Accounting adds separate buffer
+reasons, latency breakdowns and replay audits. The follow-up restores vrr14's
+slot-only presentation-protection threshold, expands the preset allowances to
+2/2/4 source frames, and shortens initial qualification without accelerating
+ongoing buffer growth. See [VRR17 review](docs/vrr17-review.md) for the historical
+comparison and [calibration follow-up](docs/vrr17-calibration.md) for current
+policy, tests and validation limits. The existing D3D11 4K binding eligibility change
+(2026-09-17) means single-device streams at least 3840x2160 bind instead of copying
 when Feature Level 11.1+ or D3D11 fences are available. Existing Intel and
 separate-device binding, lower-resolution copy behavior and explicit overrides
-are unchanged. Backbuffer clearing, context locking, pacing, buffering, native
-presentation and replay match the pre-optimization baseline. The subsequent
+are unchanged. That binding-only change left backbuffer clearing, context
+locking, pacing, buffering, native presentation and replay alone. Its subsequent
 raster-guard, buffer-first and startup/replay experiments have been removed at
 the user's request after continued tearing; their changes are archived outside
 the worktree. This binding-only restoration is not yet live-confirmed tear-free.
+
+The follow-up [user-facing diagnostics](docs/vrr-diagnostics.md) adds a shared
+Windows/Linux **Trace VRR frames for debugging** checkbox and local ZIP export.
+Recordings are saved in per-stream subfolders of `vrr-diagnostics` on the user's
+Desktop. Tracing does not select or modify timing policies, and Moonlight does
+not upload the logs. The unpublished timing-comparison selector was removed.
 
 The baseline includes Linux VRR probe/playback color-range alignment
 (2026-09-16), originally `352f4827` plus removal of the Allow tearing preference
@@ -32,8 +45,13 @@ Latency and Balanced Target, 0.2 ms for Smooth), driving the severity-weighted
 preset-duration quality score. Low Latency / Balanced Target / Smooth seek
 99% / 99.5% / 99.99% over 1/2/5 minutes, with 6/8/10-second holds and
 125/100/50 us-per-second release, within the shared three-frame queue and
-0.5/1/3-source-frame caps. Smooth may retain up to 24 ms, subject to the
-queue-capacity safety bound.
+2/2/4-source-frame allowances. Low Latency and Balanced Target remain capped at
+16 ms, Smooth at 24 ms, all subject to the queue-capacity safety bound. These
+are ceilings, not fixed delays or a larger physical queue.
+Initial interval calibration requires at least 500 ms of contiguous coverage
+and 32 valid intervals. Ordinary growth remains at most 250 us per 250 ms,
+applied at most 125 us per frame. Once qualified, a sequence break requires the
+historical one-second requalification; FPS changes cannot rearm fast startup.
 Live sessions also cap the preset allowance against the fitted source period,
 not only the negotiated stream rate. Successful Windows present-ready fence
 waits and Linux Vulkan output-texture completion polls feed a separate bounded
@@ -53,11 +71,12 @@ The former V2 Queue A/B checkbox and its runtime configuration fields are remove
 The saved `v2queue` setting is ignored and removed on save, so previously disabled
 installations also use the new queue. Legacy policies remain only for explicit
 historical diagnostic configurations. Reconnect after changing latency presets.
-Updated 2026-09-11: displayed frame queue delay excludes the worker's explicit
-GPU decode synchronization wait. The existing decoding statistic is unchanged;
-no new overlay statistic is added. Full decoder-output-to-present-return timing
-and the decode-wait duration remain in internal diagnostics. Queue plus rendering
-alone therefore no longer equals full internal client processing time.
+Updated 2026-09-18: displayed frame queue delay still excludes the worker's
+explicit GPU decode synchronization wait. Existing decoding, queue and rendering
+statistics keep their definitions. The wait is now shown on its own labelled
+line; it is never merged into an old statistic. Full decoder-output-to-Present-
+return time remains diagnostic, with no new aggregate overlay headline. Queue
+plus rendering plus that separate wait partitions internal client processing.
 The initial map came from nine Luna Medium specialists, followed by
 targeted source checks and corrections. No live capture, optical measurement,
 build, or test run was part of this documentation investigation. Recheck the
@@ -273,7 +292,8 @@ not optical scanout confirmation. Discontinuous/missing frames break the pair;
 their drops remain separately visible.
 
 The controller and overlay share one one-second average (10 ms buckets). After
-one second of valid coverage, mean error through the selected profile tolerance
+initial qualification (500 ms and 32 intervals), or one-second requalification
+following a later sequence break, mean error through the selected profile tolerance
 is accepted (0.5 ms for Low Latency/Balanced Target, 0.2 ms for Smooth). For each
 evaluated interval, revision 7 computes
 `loss = clamp(max(meanErrorUs - toleranceUs, 0) / intendedIntervalUs, 0, 1)`.
@@ -494,7 +514,8 @@ retaining the current per-frame controller over rate protection or adaptive-only
 spacing, but cannot model a change of native backend or prove a visual remedy.
 A fresh gameplay capture is required for that comparison.
 
-Current VRR timing choices (after `20fa2bc4`, 2026-09-09): the `VRR timing`
+Current VRR timing choices (introduced after `20fa2bc4`, allowances updated
+2026-09-18): the `VRR timing`
 selector offers Low Latency, Balanced Target, and Smooth throughout the VRR
 frame-rate range. `vrrlatencymode` persists IDs 2, 1, and 0 respectively.
 Balanced Target is the new-user default. A saved mode takes precedence;
@@ -505,9 +526,9 @@ reconnect after changing it. Fixed-refresh pacing is independent of this setting
 
 | Timing choice | Adaptive playout-buffer cap | Stale-work allowance with a successor |
 | --- | --- | --- |
-| Low Latency (2) | Half a fitted source period (live); configured period (historical) | Two fitted source periods |
-| Balanced Target (1, default) | One fitted source period (live); configured period (historical) | Two fitted source periods |
-| Smooth (0) | Three fitted source periods (live); configured period (historical) | Two fitted source periods |
+| Low Latency (2) | Two fitted source periods | Two fitted source periods |
+| Balanced Target (1, default) | Two fitted source periods | Two fitted source periods |
+| Smooth (0) | Four fitted source periods | Two fitted source periods |
 
 Low Latency and Balanced Target are capped at 16 ms; Smooth is capped at
 24 ms. Production sets
@@ -526,13 +547,15 @@ smoothness follows from the selected allowance.
 
 With `playout_responsive_buffer` enabled, live sessions set
 `playout_delay_cap_uses_observed_period=1`, so preset caps follow the fitted
-source period. A desktop transition from 120 to 19 or 30 FPS therefore cannot
-expand the allowance, and a source that delivers below its nominal rate is not
-silently clipped to the nominal period. The zero default retains the configured
+source period. A desktop transition from 120 to 19 or 30 FPS cannot expand the
+absolute ceiling, although the source-relative allowance follows the fitted
+period until another cap binds. A source that delivers below its nominal rate is
+not silently clipped to the nominal preset period. The zero default retains the configured
 stream-rate cap for historical replay. `VrrSessionConfig::latencyMode` resolves
 the buffer cap into the trace/replay parameter
-`playout_delay_cap_source_period_per_mille`: 500 for Low Latency, 1000 for
-Balanced Target, and 3000 for Smooth. A zero schema default means an older
+`playout_delay_cap_source_period_per_mille`: 2000 for Low Latency and
+Balanced Target, and 4000 for Smooth. Earlier captures retain their recorded
+ratios (including vrr17's 500/1000/3000). A zero schema default means an older
 capture has no source-relative cap and retains its recorded behavior. The
 historical `latency_fix_enabled`, `latency_fix_all_rates`, and
 `latency_fix_delay_period_per_mille` fields remain recorded so old captures
@@ -740,6 +763,16 @@ Unsupported presentation or failed worker initialization falls back to the
 legacy path. A UI checkbox alone cannot establish DXGI capability, active
 adaptive presentation, or that the physical panel is varying refresh.
 
+`tracevrrframes` defaults to false. The Settings checkbox enables diagnostic
+frame tracing only, with export of the latest completed recording and a button
+to open `Desktop/vrr-diagnostics`. The platform's Desktop location is resolved
+through Qt, rather than hardcoding an English profile path. The session owns its
+environment wrapper after acquiring the active-session semaphore, restoring it
+only after decoder shutdown
+and logger drain. Existing external trace launchers take precedence. Recording is
+fixed for the stream, including decoder recreation; full UI/file/lifecycle
+contracts are in [diagnostics](docs/vrr-diagnostics.md).
+
 ### 3.2 Host frame-limiter discovery
 
 Vibeshine advertises optional `/serverinfo` fields `FrameLimiterSupported`,
@@ -862,11 +895,11 @@ queue/pacing      = client processing - rendering - explicitDecodeSyncWait
 Check validity and ordering before subtracting. Post-decode includes queueing,
 GPU dependencies, rendering/preparation, scheduler delays, deliberate pacing,
 and native submission behavior. It is not simply the configured playout delay.
-The performance overlay uses the vrr14 layout: frame queue delay and rendering
+The performance overlay retains frame queue delay and rendering
 time, without a separate client-processing row. These use the current queue/pacing
 and rendering quantities for successfully presented frames, with one shared frame count.
 Queue/pacing excludes the explicit worker GPU decode wait. The two displayed
-components plus that internal diagnostic wait partition client processing.
+components plus the separate GPU decode synchronization line partition client processing.
 Queue/pacing includes queue residence, target waits and other time outside
 preparation, presentation and explicit decode synchronization. “Client processing
 delay” ends when the presentation call returns. It does not include unmeasured
@@ -1023,11 +1056,15 @@ decoder surface or native image while a GPU operation can still reference it.
 Its initializer values preserve older behaviors for replay and tests.
 `vrrTimingParametersForSession()` overrides them for production. A comment or
 schema default is insufficient evidence of the current session policy.
+The diagnostics checkbox does not alter this session config or the resolved
+timing parameters. Exact replay uses captured parameters, independent of whether
+the recording was enabled through Settings or an external launcher.
 
 The resolver enables timestamp playout, shared readiness history and adaptive
 delay. Both Linux and Windows use prediction-only growth with
 `playout_readiness_hitch_threshold_us=0`. Native-hitch adaptation is disabled.
-The current latency presets and per-frame native latch requests are preserved.
+The latency presets set independent caps; per-frame native slot protection
+remains enabled.
 Display smoothness feedback remains diagnostic. Historical Linux submission-error
 attribution is retained for replay, but not selected by live sessions.
 Historical feedback policies remain selectable for exact replay.
@@ -1038,12 +1075,14 @@ It also sets `latchedFloorDisabled=1` and disables the extra queue-mode budget.
 | --- | --- |
 | Delay start seed | 6,000 us, then source/display/work/capacity scaling below |
 | Delay minimum input | 1,000 us, capped by available capacity and the selected timing allowance |
-| Delay maximum input | 16,000 us, then capped by available capacity and the selected source-frame allowance |
+| Delay maximum input | 16,000 us for Low Latency/Balanced Target, 24,000 us for Smooth; also capped by capacity and the selected 2/2/4-source-frame allowance |
 | Start-period ratio | 950 per mille of fitted source period |
 | Maximum-period ratio | 0; source-rate reduction cannot expand the absolute ceiling |
-| Delay attack | At most 500 us per update |
-| Delay release input | 10 us, scaled by elapsed time at a 120 FPS reference rate |
-| Prediction margin | Both platforms: 500 us above recent readiness demand, inside preset caps |
+| Initial interval calibration | At least 500 ms and 32 consecutive valid intervals; once per controller reset, not once per FPS change |
+| Interval requalification after a break | One second and at least two valid intervals, after initial calibration has completed |
+| Live interval-buffer attack | Request at most 250 us per 250 ms; apply at most 125 us per frame, with current quality pressure and fresh readiness-attributed error |
+| Live interval-buffer release | 125/100/50 us per second after 6/8/10-second clean holds for Low Latency/Balanced Target/Smooth; below-target history also holds protection |
+| Historical readiness attack/release inputs | 500 us attack and 10 us release; not the live revision-7 growth/release rule |
 | Live preset-cap basis | Fitted source period (`playout_delay_cap_uses_observed_period=1`); captured policies retain their recorded basis |
 | GPU readiness lead | Recent completed present-ready wait p99 plus 500 us, attacked by at most 1,000 us per sample and released at 250 us/s |
 | GPU readiness ceiling | `min(12,000 us, fitted source period)`; target/deadline unchanged |
@@ -1176,15 +1215,14 @@ qualifying projections, so one early timestamp does not shift the entire stream.
 A late frame can clamp to the present execution opportunity while the next
 frame retains its own source slot.
 
-Production sets `playout_adaptive_only=0`, `playout_per_frame_latch=2`, and
+Production sets `playout_adaptive_only=0`, `playout_per_frame_latch=1`, and
 `playout_rate_protection_enabled=0`. Before applying software spacing floors,
-each target is compared with `lastSubmission + displayPeriod + guard + safetyHeadroom`.
-The headroom uses the existing VRR12 entry threshold (225 us) or full exit
-threshold (400 us when already latched), including explicit display-scaled
-threshold overrides. If it falls earlier and the presenter supports native protection, that slot is latched
+each target is compared with `lastSubmission + displayPeriod + guard`.
+This restores vrr14's planned-slot protection rule, without vrr17's extra
+225/400 us entry/exit allowance. If it falls earlier and the presenter supports native protection, that slot is latched
 and its software floor is disabled. Otherwise the adaptive floor applies.
 DXGI uses `Present(1, 0)` for protected slots and
-`Present(0, DXGI_PRESENT_ALLOW_TEARING)` with headroom. Diagnostic composition already
+`Present(0, DXGI_PRESENT_ALLOW_TEARING)` for slots that clear that threshold. Diagnostic composition already
 provides native ordering; its protection capability likewise permits a slot
 without the extra CPU floor. It does not expose DXGI tearing flags.
 
@@ -1192,23 +1230,23 @@ This allows source-rate changes and recovery from late work without permanently
 carrying a refresh-plus-guard delay into every subsequent frame. The explicit
 adaptive-only policy remains replayable and takes precedence over latch flags.
 Historical rate protection uses the shared below-refresh recommendation cutoff.
-Backends without native protection enforce the entry safety margin through
-their software spacing floor. Their presentation mode remains unchanged.
+Backends without native protection enforce the display-period-plus-guard
+software spacing floor. Their presentation mode remains unchanged.
 
-Revision 1 omitted the extra headroom and remains available for exact historical
-replay; revision 0 retains the older cadence-based latch policy. At steady
+Revision 2 retains vrr17's extra headroom for explicit historical replay;
+revision 0 retains the older cadence-based latch policy. At steady
 116 FPS / 120 Hz, rounded periods are 8621 and 8333 us with a 100 us base guard:
 188 us clears revision 1's interval check but not VRR12's 225 us entry margin.
-Revision 2 restores that missing allowance on the planned per-frame interval,
+Historical revision 2 added that allowance on the planned per-frame interval,
 without reinstating the 64-frame recovery hold or changing buffer targets.
-This is a protection correction, not evidence that VRR12 predicted scanout more
-accurately. Both versions start their spacing calculation at CPU submission.
+Neither threshold proves scanout prediction accuracy. Both versions start
+their spacing calculation at CPU submission.
 The extra margin is a historical safety allowance, not a measured bound on
 driver/flip/scanout delay. Native synchronized presents may change actual
 latency and cadence even when planned targets are identical. A capture from
 the affected machine and Windows visual validation are still required.
 
-Validation on macOS, 2026-09-12: timing-controller, rate-policy, pacing-worker,
+Historical revision-2 validation on macOS, 2026-09-12: timing-controller, rate-policy, pacing-worker,
 replay-config, DXGI-call-boundary, profile, Vulkan mode-selection and persistent
 mode-capability tests pass. The new headroom regressions fail against the
 unchanged VRR16 calculation and pass after the correction. Fresh single-frame
@@ -1457,10 +1495,10 @@ capacity        = 3 * period
 occupied        = renderLead + presentationSafety
                 + (smoothingEnabled ? maximumSmoothingLag : 0)
 queueDelayLimit = max(0, capacity - occupied)
-modeAllowance   = Smoothest: negotiatedStreamPeriod * 2000 / 1000
-                | Balanced: negotiatedStreamPeriod * 1000 / 1000
-                | Lowest latency: negotiatedStreamPeriod * 500 / 1000
-maximumInput    = 16000 us
+modeAllowance   = Smooth: fittedSourcePeriod * 4000 / 1000
+                | Balanced Target: fittedSourcePeriod * 2000 / 1000
+                | Low Latency: fittedSourcePeriod * 2000 / 1000
+maximumInput    = Smooth: 24000 us | other presets: 16000 us
 effectiveMin    = min(1000 us, queueDelayLimit, modeAllowance)
 effectiveMax    = min(maximumInput, queueDelayLimit, modeAllowance)
 ```
@@ -1468,8 +1506,10 @@ effectiveMax    = min(maximumInput, queueDelayLimit, modeAllowance)
 The cold start first takes `max(6000 us, 0.95 * sourcePeriod)`, caps that by
 `max(displayPeriod, renderLead)` for history mode, then clamps to effective
 minimum/maximum. Consequently neither “the buffer always starts at 6 ms” nor
-"the maximum is 8 ms" describes current production. The 16 ms absolute maximum is further reduced by the selected
-source-frame allowance and three-frame storage limit. The allowance is not a promise of total
+"the maximum is 8 ms" describes current production. The 16/16/24 ms absolute
+ceilings are further reduced by the selected source-frame allowance and
+three-frame queue-capacity bound. In particular, a four-frame Smooth allowance
+does not allocate four waiting frames or guarantee that all four fit. The allowance is not a promise of total
 decode-to-submission latency because rendering and applicable native/CPU floors
 remain outside the adaptive playout buffer.
 
@@ -1499,6 +1539,16 @@ prior instead of automatically erasing it. Cached evidence is not proof of
 current-session coverage. Display epoch changes invalidate calibration saving.
 Full reset and phase rebase differ: a rebase can preserve learned playout state
 while clearing transient timing predictors.
+
+The live interval buffer's initial-calibration flag is not loaded from this
+cache. It starts unqualified, requires both 500 ms and 32 consecutive intervals,
+and remains complete across subsequent sequence breaks and FPS changes. The
+one-second error window, growth cooldown, long quality history and release
+holds are independent of this startup shortcut. A broken sequence subsequently
+requires a full second before adaptation resumes. The trace captures
+`playout_interval_initial_warmup_us` and
+`playout_interval_initial_minimum_samples`; missing fields default to the
+historical one-second/two-interval behavior, preserving exact replay.
 
 ## 10. Windows D3D11 mechanics and native synchronization
 
@@ -1713,11 +1763,10 @@ The selected adaptive mode remains immutable for the lifetime of one persistent
 swapchain. Per-frame controller requests never destroy or recreate that chain.
 Persistent Mailbox provides synchronized, stale-image-replacing presentation,
 so it advertises protected latch support without a native mode change or the
-controller's redundant software spacing floor. Immediate retains that floor
-because it may tear; revision 2 includes the same 225 us entry safety margin in
-that floor. This prevents the shared headroom correction from having no effect
-on an Immediate backend that cannot request a synchronized native present.
-The additional spacing can reduce sustainable throughput near native refresh;
+controller's redundant software spacing floor. Immediate retains the
+display-period-plus-guard floor because it may tear. Explicit historical
+revision 2 adds a 225 us entry margin to that floor; current revision 1 does not.
+That historical extra spacing can reduce sustainable throughput near native refresh;
 worker stale-frame replacement remains responsible for bounded backlog.
 It does not turn Immediate into a tear-free native presentation mode.
 A FIFO-only compatibility path likewise does not advertise
@@ -1797,6 +1846,14 @@ selects CSV output. UNC capture paths are rejected to keep network I/O away
 from frame delivery. `MOONLIGHT_VRR_DEEP_TRACE` requests deeper instrumentation;
 alignment is the separate native raster option described above.
 
+The Settings recording wrapper creates a unique per-stream folder under
+`Desktop/vrr-diagnostics`, sets only the trace/deep-trace variables, and collects
+the existing redacted session logging plus a small configuration manifest.
+Export is an asynchronous, atomic ZIP containing only this capture's known files.
+Active recordings are locked against export; previous environment values are
+restored at stream cleanup. This shared Qt code is used on Windows and Linux,
+with wide Windows file paths and rejection of mapped-network capture roots.
+
 The writer consumes a bounded 8192-row MPSC ring. Producers reserve and publish
 slots with atomic sequence numbers; the writer never owns a producer mutex.
 A full queue or exhaustion of 16 bounded reservation attempts drops diagnostic
@@ -1806,7 +1863,8 @@ The size policy uses a 512 MiB cap only after at least an hour of arrival-time
 coverage. Clean-close footer accounting, row sequences, dropped rows, write
 failures, and cap state therefore matter to replay fidelity.
 
-The launcher chooses one canonical trace path per application run. Before a new
+External launchers choose one canonical trace path per application run; the
+Settings wrapper chooses one per stream. Before a new
 worker reuses an existing file at that path, it archives the previous connection
 as `<base>-connection-1.<suffix>` (then 2, 3, etc., without overwriting an existing
 archive). If archiving fails, tracing is disabled instead of destroying the old
@@ -1830,7 +1888,7 @@ older policies may store the wall time after that wait. Overlay client processin
 boundary exactly; readiness-to-submission is not an interchangeable latency metric.
 
 Every row also records `session_latency_mode`, `session_readiness_hitch_feedback`,
-`calibration_loaded`, `initial_cached_samples`, and `history_version`. The final
+`calibration_loaded`, `initial_cached_samples`, and `history_version`. The
 `session_allow_tearing` column records the native permission. New sessions
 always record it as enabled; historical captures without it default to enabled,
 while replay retains an explicit false value from an older capture. Worker
@@ -1841,6 +1899,10 @@ Nondecision rows have invalid/zero history snapshots. Cached sample count is the
 startup prior, not current live evidence. No additional histogram calculation,
 formatting, or I/O occurs on frame delivery; these additions do not steer policy.
 The existing initial-profile column identifies the complete calibration snapshot.
+Optional buffer-accounting fields also include `buffer_calibration_complete`,
+`buffer_calibration_samples`, and `buffer_calibration_coverage_us`. They describe
+live interval qualification, separately from cached readiness history. Replay
+audits their values when present; missing historical fields are not invented.
 Columns are appended without changing schema, retention, launcher environment,
 or existing field meanings, so older replay readers can ignore the extension.
 
@@ -1945,9 +2007,9 @@ it cannot isolate the game engine or detect repeated image content from timing
 alone. It is independent of the native-confirmed client hitch metric and does
 not change buffer adaptation.
 
-The stats overlay and session summary show client readiness over a rolling
-30-second outcome window, alongside the selected target and a buffer-limit
-indicator. Revision 3 and later measure preparation completion against the intended
+For historical revision 3-5 policies, the stats overlay and session summary show
+client readiness over a rolling 30-second outcome window, alongside the selected
+target and a buffer-limit indicator. Revision 3 and later measure preparation completion against the intended
 smooth deadline before late-readiness and display-floor recovery clamps.
 Client playback drops count as misses; deliberate shutdown, suspension, and
 interruption discards are excluded. A second row reports the percentages late
@@ -1958,11 +2020,22 @@ available outcomes before 30 seconds have elapsed. This remains a readiness
 measurement, not a visible-smoothness score. With no eligible frames, the line
 shows the starting state. Revision 4 applies the same thresholded-miss policy to
 this score: through 1 ms is on time, 1-2 ms counts only above 50% prevalence,
-and over 2 ms or a drop always counts. Motion cadence, queue residence and GPU
-waits remain internal diagnostics.
+and over 2 ms or a drop always counts. Production revision 7 instead reports
+the interval buffer's one-second mean error and severity-weighted quality over
+the preset's history window; these are not that older readiness percentage.
 
-Submission cadence, motion jerk, queue residence, decode waits, and buffer
-counters remain collected internally. Submission cadence counts eligible
+The overlay now also shows reserve/cap/request, growth and hold reasons,
+last growth and capped-step ages, queue residence versus pacing/other time,
+preparation versus Present, GPU-ready waiting inside preparation, and protected
+submission share. GPU preparation head start is explicitly a budget. Submission
+jerk is exposed separately from the interval controller's **Client timing
+quality** score; neither is physical display smoothness. The trace extension
+records the attributed late frame, attempted and clipped growth, and hold/
+cooldown time. It does not change requested or applied delay. In particular,
+the historical capacity flag can miss revision-7 growth that was already
+clipped inside the observer; `buffer_clipped_increase_us` exposes that loss.
+
+Submission cadence counts eligible
 consecutive submission-predicted intervals with client-added spacing error over
 3 ms. Motion jerk counts adjacent submission intervals differing by over 2 ms,
 including host cadence changes, source stalls, and local drops. Neither proves
@@ -2050,6 +2123,10 @@ history behavior, queue/drop/cancellation/suspension, ownership, wait floors,
 trace integrity, native diagnostic modeling, and replay configuration/contracts.
 Consult the test names and assertions for the specific behavior being changed;
 the existence of a broad suite is not proof that a native API argument is tested.
+`tst_vrrdiagnostics` additionally exercises capture scope, environment restoration,
+export locking, file preservation and ZIP bounds; the independent Python ZIP
+check verifies contents and CRCs. Windows CI includes that test and exact replay
+of cold and warm-history worker fixtures under the unchanged production policy.
 
 The ordinary application build does not build the opt-in replay/tests.
 Follow AGENTS.md to build diagnostics separately and run all four suites plus

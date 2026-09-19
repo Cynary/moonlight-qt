@@ -12,6 +12,7 @@ class VrrReplayConfigTest : public QObject
 
 private slots:
     void defaultsRoundTrip();
+    void initialCalibrationPolicyRoundTrip();
     void offsetRecoveryPolicyRoundTrip();
     void nativeHitchPolicyRoundTrip();
     void displayEventPolicyRoundTrip();
@@ -47,6 +48,28 @@ private slots:
     void busyWorkerReadinessFloor();
     void decodeReadinessOrder();
 };
+
+void VrrReplayConfigTest::initialCalibrationPolicyRoundTrip()
+{
+    VrrTimingParameters parameters;
+    QCOMPARE(parameters.playoutIntervalInitialWarmupUs, uint64_t(1000000));
+    QCOMPARE(parameters.playoutIntervalInitialMinimumSamples, size_t(2));
+    const auto production = vrrTimingParametersForSession(VrrSessionConfig{});
+    QString error;
+    QVERIFY2(applyVrrReplayControllerSnapshot(vrrTimingParametersToJson(production), parameters, error), qPrintable(error));
+    QCOMPARE(parameters.playoutIntervalInitialWarmupUs, uint64_t(500000));
+    QCOMPARE(parameters.playoutIntervalInitialMinimumSamples, size_t(32));
+    for (uint64_t invalid : {0ULL, 249999ULL, 1000001ULL}) {
+        QVERIFY(!applyVrrReplayControllerSnapshot(
+            {{"playout_interval_initial_warmup_us", double(invalid)}}, parameters, error));
+        QCOMPARE(parameters.playoutIntervalInitialWarmupUs, uint64_t(500000));
+    }
+    for (int invalid : {0, 1, 513}) {
+        QVERIFY(!applyVrrReplayControllerSnapshot(
+            {{"playout_interval_initial_minimum_samples", invalid}}, parameters, error));
+        QCOMPARE(parameters.playoutIntervalInitialMinimumSamples, size_t(32));
+    }
+}
 
 void VrrReplayConfigTest::defaultsRoundTrip()
 {

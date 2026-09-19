@@ -47,6 +47,7 @@
 #include "cli/commandlineparser.h"
 #include "path.h"
 #include "utils.h"
+#include "diagnostics/diagnosticcapture.h"
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
@@ -96,7 +97,7 @@ extern "C" bool g_DisableDrmHooks;
 class LoggerTask : public QRunnable
 {
 public:
-    LoggerTask(const QString& msg) : m_Msg(msg)
+    LoggerTask(const QString& msg, bool normalOutput = true) : m_Msg(msg), m_NormalOutput(normalOutput)
     {
         setAutoDelete(true);
     }
@@ -108,13 +109,24 @@ public:
         // between synchronous and asynchronous. Asynchronous won't contend in
         // the common case because we only have a single logging thread.
         QMutexLocker locker(&s_SyncLoggerMutex);
-        s_LoggerStream << m_Msg;
-        s_LoggerStream.flush();
+        if (m_NormalOutput) {
+            s_LoggerStream << m_Msg;
+            s_LoggerStream.flush();
+        }
+        DiagnosticCapture::appendLog(m_Msg);
     }
 
 private:
     QString m_Msg;
+    bool m_NormalOutput;
 };
+
+void Utils::flushLogs()
+{
+    s_LoggerThread.waitForDone();
+    QMutexLocker locker(&s_SyncLoggerMutex);
+    s_LoggerStream.flush();
+}
 
 void logToLoggerStream(QString& message)
 {
@@ -134,10 +146,12 @@ void logToLoggerStream(QString& message)
     message.replace(k_RikeyRegex, "&rikey=REDACTED");
     message.replace(k_RikeyIdRegex, "&rikeyid=REDACTED");
 
+    bool normalOutput = true;
 #ifdef LOG_TO_FILE
     auto oldLogSize = s_LogBytesWritten.fetchAndAddRelaxed(message.size());
     if (oldLogSize >= k_MaxLogSizeBytes) {
-        return;
+        if (!DiagnosticCapture::isActive()) return;
+        normalOutput = false;
     }
     else if (oldLogSize >= k_MaxLogSizeBytes - message.size()) {
         // Write one final message
@@ -147,11 +161,11 @@ void logToLoggerStream(QString& message)
 
     if (g_AsyncLoggingEnabled) {
         // Queue the log message to be written asynchronously
-        s_LoggerThread.start(new LoggerTask(message));
+        s_LoggerThread.start(new LoggerTask(message, normalOutput));
     }
     else {
         // Log the message immediately
-        LoggerTask(message).run();
+        LoggerTask(message, normalOutput).run();
     }
 }
 

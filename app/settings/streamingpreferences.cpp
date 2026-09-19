@@ -1,6 +1,7 @@
 #include "streamingpreferences.h"
 #include "utils.h"
 #include "streaming/vrrratepolicy.h"
+#include "diagnostics/diagnosticcapture.h"
 
 #include <QSettings>
 #include <QTranslator>
@@ -9,6 +10,10 @@
 #include <QReadWriteLock>
 #include <QVariantMap>
 #include <QtMath>
+#include <QDesktopServices>
+#include <QDir>
+#include <QThread>
+#include <QUrl>
 
 #include <QtDebug>
 
@@ -27,6 +32,7 @@
 #define SER_VRRLATENCYFIX "vrrlatencyfix"
 #define SER_VRRLATENCYMODE "vrrlatencymode"
 #define SER_SMOOTHVRRFRAMETIMING "smoothvrrframetiming"
+#define SER_TRACEVRRFRAMES "tracevrrframes"
 #define SER_GAMEOPTS "gameopts"
 #define SER_HOSTAUDIO "hostaudio"
 #define SER_MULTICONT "multicontroller"
@@ -155,6 +161,8 @@ void StreamingPreferences::reload()
         vrrLatencyMode = settings.value(SER_VRRLATENCYFIX).toBool() ? VLM_BALANCED_TARGET : VLM_SMOOTH;
     }
     smoothVrrFrameTiming = settings.value(SER_SMOOTHVRRFRAMETIMING, true).toBool();
+    traceVrrFrames = settings.value(SER_TRACEVRRFRAMES, false).toBool();
+    settings.remove("vrrdiagnosticmode"); // Retired, unpublished timing comparison selector.
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
@@ -362,6 +370,7 @@ void StreamingPreferences::save()
     settings.remove("gamescoperepaint");
     settings.remove("gamescopeforcecomposition");
     settings.setValue(SER_SMOOTHVRRFRAMETIMING, smoothVrrFrameTiming);
+    settings.setValue(SER_TRACEVRRFRAMES, traceVrrFrames);
     settings.remove("v2queue"); // The interval queue is now the production policy.
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
@@ -395,6 +404,46 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+}
+
+void StreamingPreferences::setDiagnosticsStatus(const QString& message)
+{
+    m_DiagnosticsStatus = message;
+    emit diagnosticsChanged();
+}
+
+void StreamingPreferences::openDiagnosticsFolder()
+{
+    const auto root = DiagnosticCapture::rootDirectory();
+    if (root.isEmpty() || !QDir().mkpath(root) || !QDesktopServices::openUrl(QUrl::fromLocalFile(root)))
+        setDiagnosticsStatus(tr("Unable to open the diagnostics folder: %1").arg(root));
+    else
+        setDiagnosticsStatus(tr("Diagnostics folder: %1").arg(QDir::toNativeSeparators(root)));
+}
+
+void StreamingPreferences::exportLatestDiagnostics()
+{
+    if (m_ExportingDiagnostics) return;
+    m_ExportingDiagnostics = true;
+    setDiagnosticsStatus(tr("Exporting the latest diagnostic recording..."));
+    const auto root = DiagnosticCapture::rootDirectory();
+    // Trace ZIPs can be large. Keep export I/O out of both the GUI and pacing.
+    struct ExportResult { QString destination, error; };
+    const auto result = std::make_shared<ExportResult>();
+    auto thread = QThread::create([root, result] {
+        result->destination = DiagnosticCapture::exportLatest(root, result->error);
+    });
+    connect(thread, &QThread::finished, this, [this, root, result] {
+        m_ExportingDiagnostics = false;
+        setDiagnosticsStatus(result->destination.isEmpty() ? result->error :
+            tr("Exported: %1").arg(QDir::toNativeSeparators(result->destination)));
+        if (!result->destination.isEmpty()) QDesktopServices::openUrl(QUrl::fromLocalFile(root));
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    // Finish the atomic export on normal application exit. The worker never
+    // dereferences preferences; Qt discards the UI callback if they are gone.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, thread, [thread] { thread->wait(); });
+    thread->start();
 }
 
 QVariantList StreamingPreferences::getFpsChoices(const QVariantList& refreshRates) const

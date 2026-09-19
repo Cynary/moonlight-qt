@@ -689,6 +689,11 @@ void testTelemetrySnapshotsRemainCumulative()
             sample.decisionTimeUs = i;
             sample.clientProcessingTimeUs = i * 3;
             sample.renderingTimeUs = i * 2;
+            sample.preparationUs = i;
+            sample.presentCallUs = i;
+            sample.gpuReadyWaitUs = i;
+            sample.gpuReadyWaitValid = i % 2 == 0;
+            sample.latched = i % 2 == 0;
             sample.prepareLate = (i % 2) == 0;
             sample.preparationLatenessUs = i;
             sample.cadenceIntervals = i / 2;
@@ -727,10 +732,23 @@ void testTelemetrySnapshotsRemainCumulative()
     delayedSubmission.targetWaitEntryLate = true;
     delayedSubmission.clientProcessingTimeUs = 1000000;
     delayedSubmission.renderingTimeUs = 900000;
+    delayedSubmission.preparationUs = 800000;
+    delayedSubmission.presentCallUs = 100000;
+    delayedSubmission.gpuReadyWaitUs = 700000;
+    delayedSubmission.gpuReadyWaitValid = true;
+    delayedSubmission.latched = true;
     telemetry.recordVrrFrame(delayedSubmission);
 
     const PacerTelemetrySnapshot finalSnapshot = telemetryStats(telemetry);
     constexpr uint64_t sequenceSum = frameCount * (frameCount + 1) / 2;
+    expect(finalSnapshot.vrrPreparationUs == sequenceSum &&
+               finalSnapshot.vrrPresentCallUs == sequenceSum &&
+               finalSnapshot.vrrGpuReadyWaitUs == (frameCount / 2) * (frameCount / 2 + 1) &&
+               finalSnapshot.vrrGpuReadyWaitFrames == frameCount / 2 &&
+               finalSnapshot.vrrLatchedFrames == frameCount / 2 &&
+               finalSnapshot.vrrPresentedFrames == frameCount &&
+               finalSnapshot.vrrQueuePacingUs == sequenceSum,
+           "stage costs must exclude failed work and GPU detail must count only valid measurements");
     expect(finalSnapshot.vrrCadenceIntervals == frameCount / 2 &&
                finalSnapshot.vrrCadenceHitches == frameCount / 128,
            "publishing cumulative cadence snapshots must not count them repeatedly");
@@ -759,6 +777,11 @@ void testTelemetrySnapshotsRemainCumulative()
                finalSnapshot.vrrPresentFailedFrames == 1 &&
                finalSnapshot.vrrStateSequence == finalSnapshot.sequence,
            "telemetry must keep bounded timing distributions and output outcomes separate");
+    telemetry.recordLegacyFrame(9000, 1000);
+    const auto mixed = telemetryStats(telemetry);
+    expect(mixed.renderedFrames == frameCount + 1 && mixed.vrrPresentedFrames == frameCount &&
+               mixed.vrrQueuePacingUs == sequenceSum && mixed.vrrPreparationUs == sequenceSum,
+           "legacy fallback frames must not dilute the separate VRR cost breakdown");
 }
 
 void testSuspendDiscardAndFreshFrame()
@@ -1590,6 +1613,16 @@ void testSmoothnessTraceCapturesReadinessPolicy()
             continue;
         }
         foundPresentedRow = true;
+        const auto field = [&](const char* name) { return fields.value(columns.indexOf(name)).toULongLong(); };
+        expect(field("buffer_update_valid") == 1 && field("buffer_update_frame") == field("frame") &&
+               field("buffer_cap_us") >= field("playout_delay_us") &&
+               field("buffer_queue_limit_us") >= field("buffer_cap_us") &&
+               field("buffer_request_before_us") == field("buffer_request_after_us"),
+               "the cold-start trace must expose caps and its actual outcome without invented growth");
+        expect(field("param_playout_interval_initial_warmup_us") == 500000 &&
+                   field("param_playout_interval_initial_minimum_samples") == 32 &&
+                   field("buffer_calibration_complete") == 0 && field("buffer_calibration_samples") == 0,
+               "cold-start tracing must capture the calibration policy without inventing learned evidence");
         expect(fields.value(additionalQueueColumn) == "0" &&
                    fields.value(lowPercentileColumn) == "0" &&
                    fields.value(loosePercentileColumn) == "80" &&
@@ -1713,8 +1746,12 @@ void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
            "deep diagnostics test must create a temporary directory");
     const QString tracePath = traceDirectory.filePath("vrr-deep-trace.vrrtrace");
     const QByteArray tracePathBytes = QFile::encodeName(tracePath);
-    SDL_setenv("MOONLIGHT_VRR_TRACE", tracePathBytes.constData(), 1);
-    SDL_setenv("MOONLIGHT_VRR_DEEP_TRACE", "1", 1);
+    // Match the Settings checkbox: update the process environment after SDL
+    // initialized, without relying on SDL2-compat's cached environment copy.
+    SDL_setenv("MOONLIGHT_VRR_TRACE", "", 1);
+    SDL_setenv("MOONLIGHT_VRR_DEEP_TRACE", "0", 1);
+    expect(qputenv("MOONLIGHT_VRR_TRACE", tracePathBytes), "checkbox trace path must be set");
+    expect(qputenv("MOONLIGHT_VRR_DEEP_TRACE", "1"), "checkbox deep tracing must be set");
     FakeVrrFramePresenter backend;
     PacerTelemetry telemetry;
     TrackedFrameLifetime first;
@@ -1908,8 +1945,10 @@ void testTraceCapturesAllowTearingWithoutChangingController()
         const auto lines = expanded.split('\n');
         const auto columns = lines.value(0).split(',');
         const auto fields = lines.value(1).split(',');
-        expect(columns.size() == fields.size() && columns.last() == "session_allow_tearing",
-               "permission must be an appended schema-5 field aligned with the row");
+        expect(columns.size() == fields.size() &&
+                   columns.indexOf("session_allow_tearing") == columns.indexOf("latency_test_phase") + 1 &&
+                   columns.indexOf("buffer_cap_us") == columns.indexOf("session_allow_tearing") + 1,
+               "appended diagnostics must preserve the schema-5 permission position and row alignment");
         expect(fields.value(columns.indexOf("session_allow_tearing")) ==
                    (allowTearing ? "1" : "0"),
                "trace must identify the snapshotted native permission arm");

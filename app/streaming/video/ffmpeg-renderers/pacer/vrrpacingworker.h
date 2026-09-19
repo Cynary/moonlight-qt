@@ -146,6 +146,7 @@ private:
         FrameTraceContext input;
         VrrTimingDecision decision;
         VrrTimingDiagnostics diagnostics;
+        Vrr13::IntervalBuffer::Stats bufferStats;
         VrrPresentFeedback feedback;
         FrameTelemetry telemetry;
         size_t completionQueueDepth = 0;

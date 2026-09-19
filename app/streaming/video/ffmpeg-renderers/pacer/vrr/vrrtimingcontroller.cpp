@@ -22,7 +22,7 @@ constexpr uint64_t kPlayoutMaximumUs = 8000;
 // profiles. Keep it below the three-frame ownership limit while allowing the
 // requested extra padding to be observable at ordinary stream rates.
 constexpr uint64_t kSmoothPlayoutMaximumUs = 24000;
-constexpr uint64_t kSmoothPlayoutCapSourcePeriodPerMille = 3000;
+constexpr uint64_t kSmoothPlayoutCapSourcePeriodPerMille = 4000;
 // Smooth's tighter cadence target is intentionally a separate policy value;
 // keep the historical default below unchanged for old captures and direct
 // IntervalBuffer callers.
@@ -158,7 +158,7 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.latencyFixAllRates = latencyMode != 0 ? 1 : 0;
     parameters.latencyFixDelayPeriodPerMille = latencyMode == 2 ? 0 : 500;
     parameters.playoutDelayCapSourcePeriodPerMille = config.latencyFix ? 0 :
-        latencyMode == 2 ? 500 : latencyMode == 1 ? 1000 :
+        latencyMode != 0 ? 2000 :
         kSmoothPlayoutCapSourcePeriodPerMille;
     // The nominal 116 Hz period was shorter than the measured ~99 Hz source
     // in the deep capture, so it clipped the queue exactly when GPU stalls
@@ -171,6 +171,10 @@ VrrTimingParameters vrrTimingParametersForSession(
     // Every normal VRR session uses the interval-quality queue. Historical
     // policies remain selectable only through explicit diagnostic parameters.
     parameters.playoutResponsiveBuffer = config.readinessHitchFeedback ? 0 : 7;
+    // Qualify initial learning sooner with enough observations, without
+    // increasing attack speed or rearming fast calibration on FPS changes.
+    parameters.playoutIntervalInitialWarmupUs = 500000;
+    parameters.playoutIntervalInitialMinimumSamples = 32;
     // Retain earned protection between bursts instead of repeatedly shedding
     // it and reacquiring it. Explicit captured values preserve older release.
     parameters.playoutMeanMissHoldUs = latencyMode == 2 ? 6000000 : latencyMode == 1 ? 8000000 : 10000000;
@@ -193,7 +197,9 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.playoutDelayMarginUs = parameters.playoutResponsiveBuffer ? 500 : 3000;
     parameters.playoutDelayAttackUs = 500;
     parameters.playoutAdaptiveOnly = 0;
-    parameters.playoutPerFrameLatch = 2;
+    // Match vrr14's planned-slot protection. Keep revision 2 available for
+    // exact replay; native-rate/tight slots still request synchronized output.
+    parameters.playoutPerFrameLatch = 1;
     parameters.playoutRateProtectionEnabled = 0;
     parameters.playoutHistoryEnabled = 1;
     parameters.timestampPlayoutEnabled = 1;
@@ -840,6 +846,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     decision.renderStartUs = renderStartUs;
     decision.targetUs = targetUs;
     decision.presentationFloorPushUs = presentationFloorPushUs;
+    decision.playoutDelayMaximumUs = playoutDelayMaximumUs();
+    decision.playoutQueueLimitUs = playoutQueueLimitUs();
+    decision.playoutPresetCapUs = playoutDelayCapUs();
+    decision.playoutOffsetUs = playoutOffsetUs();
     decision.guardUs = m_GuardUs;
     decision.headroomUs = headroomUs();
     decision.timingBudgetUs = timingBudgetUs();
@@ -1753,7 +1763,9 @@ void VrrTimingController::noteSubmission(bool submitted, bool cancelled,
                 m_Parameters.playoutMeanMissHoldUs, m_Parameters.playoutMeanMissReleaseUsPerSecond,
                 m_Parameters.playoutResponsiveBuffer >= 7, m_Parameters.playoutOnTimeTargetPerMillion,
                 intervalQualityToleranceUs(m_Parameters),
-                intervalQualityWindowUs(m_Parameters));
+                intervalQualityWindowUs(m_Parameters),
+                m_Parameters.playoutIntervalInitialWarmupUs,
+                m_Parameters.playoutIntervalInitialMinimumSamples);
         }
         else m_MeanMissBuffer.observe(submissionUs, ready > deadline ? ready - deadline : 0,
             p.applied, submitted && !cancelled && m_Pending.hasPreparationDuration &&

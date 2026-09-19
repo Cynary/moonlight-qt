@@ -927,6 +927,14 @@ Flickable {
                     Label {
                         width: parent.width
                         wrapMode: Text.Wrap
+                        text: StreamingPreferences.vrrLatencyMode === StreamingPreferences.VLM_SMOOTH ?
+                                  qsTr("Buffer allowance: up to 4 source frames, at most 24 ms, limited by queue capacity. Actual learned delay may be lower.") :
+                                  qsTr("Buffer allowance: up to 2 source frames, at most 16 ms, limited by queue capacity. Actual learned delay may be lower.")
+                    }
+
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
                         text: qsTr("Applies at all VRR frame rates. Reconnect the stream after changing this setting.")
                     }
                 }
@@ -968,6 +976,63 @@ Flickable {
                                       qsTr("The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.")
                                     :
                                       qsTr("HDR streaming is not supported on this PC.")
+                }
+            }
+        }
+
+        GroupBox {
+            width: parent.width - (parent.leftPadding + parent.rightPadding)
+            padding: 12
+            title: "<font color=\"skyblue\">" + qsTr("VRR diagnostics") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 8
+
+                CheckBox {
+                    id: traceVrrFramesCheckBox
+                    text: qsTr("Trace VRR frames for debugging")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.traceVrrFrames
+                    onCheckedChanged: StreamingPreferences.traceVrrFrames = checked
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: qsTr("Saves frame traces and session logs to the vrr-diagnostics folder on your Desktop, with a separate folder for each stream. Does not change your VRR timing settings.")
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: qsTr("Enable VRR and reconnect the stream to start recording. Tracing can use substantial disk space and add diagnostic overhead. Uncheck this after debugging.")
+                }
+
+                Button {
+                    text: StreamingPreferences.exportingDiagnostics ? qsTr("Exporting...") : qsTr("Export latest recording (ZIP)")
+                    enabled: !StreamingPreferences.exportingDiagnostics
+                    onClicked: StreamingPreferences.exportLatestDiagnostics()
+                }
+
+                Button {
+                    text: qsTr("Open diagnostics folder")
+                    onClicked: StreamingPreferences.openDiagnosticsFolder()
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: qsTr("Disconnect before exporting. Logs contain hardware and connection details; review them before sharing. Nothing is uploaded automatically.")
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.WrapAnywhere
+                    textFormat: Text.PlainText
+                    visible: text.length > 0
+                    text: StreamingPreferences.diagnosticsStatus
                 }
             }
         }

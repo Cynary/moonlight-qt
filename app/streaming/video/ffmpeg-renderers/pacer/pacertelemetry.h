@@ -32,6 +32,10 @@ struct PacerTelemetrySnapshot {
     uint64_t vrrQueueResidenceUs = 0;
     uint64_t vrrDecodeWaitUs = 0;
     uint64_t vrrBufferUs = 0;
+    uint64_t vrrPreparationUs = 0, vrrPresentCallUs = 0, vrrGpuReadyWaitUs = 0;
+    uint64_t vrrGpuReadyWaitFrames = 0;
+    uint64_t vrrPresentedFrames = 0, vrrQueuePacingUs = 0;
+    uint64_t vrrLatchedFrames = 0;
     uint64_t vrrMotionPairs = 0;
     uint64_t vrrMotionHitches = 0;
     uint64_t vrrCadenceIntervals = 0;
@@ -62,6 +66,7 @@ struct PacerTelemetrySnapshot {
     uint64_t vrrTargetWakeLeadUs = 0;
     uint64_t vrrGuardUs = 0;
     uint64_t vrrSourcePeriodUs = 0;
+    uint64_t vrrAppliedBufferUs = 0, vrrBufferCapUs = 0, vrrGpuReadinessLeadUs = 0;
 };
 
 struct VrrTelemetrySample {
@@ -75,6 +80,9 @@ struct VrrTelemetrySample {
     uint64_t decisionTimeUs = 0;
     uint64_t clientProcessingTimeUs = 0;
     uint64_t renderingTimeUs = 0;
+    uint64_t preparationUs = 0, presentCallUs = 0, gpuReadyWaitUs = 0;
+    bool gpuReadyWaitValid = false;
+    bool latched = false;
     uint64_t preparationLatenessUs = 0;
     // Cumulative verified display-interval counters from the controller.
     uint64_t cadenceIntervals = 0;
@@ -96,6 +104,7 @@ struct VrrTelemetrySample {
     uint64_t targetWakeLeadUs = 0;
     uint64_t guardUs = 0;
     uint64_t sourcePeriodUs = 0;
+    uint64_t bufferCapUs = 0, gpuReadinessLeadUs = 0;
 };
 
 class PacerTelemetry {
@@ -213,8 +222,18 @@ public:
             m_Snapshot.vrrQueueResidenceUs += sample.queueResidenceUs;
             m_Snapshot.vrrDecodeWaitUs += sample.decodeWaitUs;
             m_Snapshot.vrrBufferUs += sample.bufferUs;
+            m_Snapshot.vrrPreparationUs += sample.preparationUs;
+            m_Snapshot.vrrPresentCallUs += sample.presentCallUs;
+            if (sample.gpuReadyWaitValid) {
+                m_Snapshot.vrrGpuReadyWaitUs += sample.gpuReadyWaitUs;
+                ++m_Snapshot.vrrGpuReadyWaitFrames;
+            }
+            m_Snapshot.vrrLatchedFrames += sample.latched;
+            const uint64_t priorQueueUs = m_Snapshot.totalQueuePacingTimeUs;
             recordPresentedTimingLocked(sample.clientProcessingTimeUs,
                                         sample.renderingTimeUs, sample.decodeWaitUs);
+            m_Snapshot.vrrQueuePacingUs += m_Snapshot.totalQueuePacingTimeUs - priorQueueUs;
+            ++m_Snapshot.vrrPresentedFrames;
         }
 
         touchLocked();
@@ -227,6 +246,9 @@ public:
         m_Snapshot.vrrTargetWakeLeadUs = sample.targetWakeLeadUs;
         m_Snapshot.vrrGuardUs = sample.guardUs;
         m_Snapshot.vrrSourcePeriodUs = sample.sourcePeriodUs;
+        m_Snapshot.vrrAppliedBufferUs = sample.bufferUs;
+        m_Snapshot.vrrBufferCapUs = sample.bufferCapUs;
+        m_Snapshot.vrrGpuReadinessLeadUs = sample.gpuReadinessLeadUs;
     }
 
 private:

@@ -106,16 +106,17 @@ jobs:
           QT_PATH: ${{ runner.workspace }}\Qt\${{ matrix.qt_version }}\msvc2022_64\bin
           MOONLIGHT_VRR_TEST_EXPORT_TRACE: ${{ github.workspace }}/build/replay-fixture.vrrtrace
           MOONLIGHT_VRR_TEST_EXPORT_WARM_TRACE: ${{ github.workspace }}/build/replay-warm-fixture.vrrtrace
+          MOONLIGHT_DIAGNOSTICS_TEST_EXPORT: ${{ github.workspace }}/build/diagnostic-fixture.zip
         run: |
           $deploy = (Resolve-Path build/deploy-x64-release).Path
           $env:Path = "$deploy;$env:QT_PATH;$env:Path"
           $tests = Get-ChildItem build/tests-vrr/vrr/release/tst_*.exe
-          if ($tests.Count -lt 8) { throw "Missing VRR test executables" }
+          if ($tests.Count -lt 9 -or -not ($tests.Name -contains 'tst_vrrdiagnostics.exe')) { throw "Missing VRR test executables" }
           foreach ($test in $tests) {
             Write-Host "Running $($test.Name)"
             if ($test.Name -eq 'tst_overlay.exe') {
               & $test.FullName (Resolve-Path app).Path
-            } elseif ($test.Name -in @('tst_vrrratepolicy.exe', 'tst_vrrreplayconfig.exe')) {
+            } elseif ($test.Name -in @('tst_vrrratepolicy.exe', 'tst_vrrreplayconfig.exe', 'tst_vrrdiagnostics.exe')) {
               & $test.FullName -o '-,txt'
             } else {
               & $test.FullName
@@ -123,6 +124,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed: $LASTEXITCODE" }
             Write-Host "Passed $($test.Name)"
           }
+          python tests/vrr/check_diagnostic_zip.py build/diagnostic-fixture.zip
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostic export ZIP validation failed" }
 
       - name: Stage and smoke-test VRR replay (Windows x64)
         if: runner.os == 'Windows'
