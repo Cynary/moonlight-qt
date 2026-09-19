@@ -5,6 +5,8 @@
 #include "settings/mappingmanager.h"
 
 #include <QtMath>
+#include "dualsensehaptics.h"
+#include <ControllerHaptics.h>
 
 // How long the Start button must be pressed to toggle mouse emulation
 #define MOUSE_EMULATION_LONG_PRESS_TIME 750
@@ -713,6 +715,8 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
             type == LI_CTYPE_PS;
 
+        state->hapticsAttached = DualSenseHaptics::attach(state->index, state->controller);
+        if (state->hapticsAttached) capabilities |= LI_CCAP_HAPTICS_PCM;
         LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
 #else
 
@@ -733,6 +737,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                 SDL_RemoveTimer(state->mouseEmulationTimer);
             }
 
+            if (state->hapticsAttached) DualSenseHaptics::detach(state->index);
             SDL_GameControllerClose(state->controller);
 
 #if !SDL_VERSION_ATLEAST(2, 0, 9)
@@ -795,6 +800,8 @@ void SdlInputHandler::handleJoystickArrivalEvent(SDL_JoyDeviceEvent* event)
 
 void SdlInputHandler::rumble(unsigned short controllerNumber, unsigned short lowFreqMotor, unsigned short highFreqMotor)
 {
+    // Native waveform playback takes precedence over legacy rumble.
+    if (DualSenseHaptics::playing(controllerNumber)) return;
     // Make sure the controller number is within our supported count
     if (controllerNumber >= MAX_GAMEPADS) {
         return;

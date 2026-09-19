@@ -1,3 +1,4 @@
+#include "input/dualsensehaptics.h"
 #include <QNetworkInterface>
 #include <QSysInfo>
 #include <QDir>
@@ -64,7 +65,12 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clRumbleTriggers,
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
-    Session::clSetAdaptiveTriggers
+    Session::clSetAdaptiveTriggers,
+#if defined(Q_OS_LINUX) && SDL_VERSION_ATLEAST(2, 24, 0)
+    DualSenseHaptics::receive
+#else
+    nullptr
+#endif
 };
 
 Session* Session::s_ActiveSession;

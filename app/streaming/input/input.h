@@ -7,6 +7,7 @@
 
 struct GamepadState {
     SDL_GameController* controller;
+    bool hapticsAttached;
     SDL_JoystickID jsId;
     short index;
 

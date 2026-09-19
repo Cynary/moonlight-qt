@@ -1820,6 +1820,41 @@ backpressure. Audio startup intentionally discards an initial backlog of about
 queued audio latency. Muting can suppress audio processing without retiming VRR.
 
 Input goes from SDL handlers to common-library input APIs and a separate sender.
+
+Linux DualSense waveform feedback (2026-09-18) runs separately from video and
+ordinary stream audio. A Bluetooth Sony DualSense/Edge with an exact SDL hidraw
+path can advertise controller capability `LI_CCAP_HAPTICS_PCM` (`0x8000`).
+The client also advertises `ML_FF_HAPTICS_PCM` (`0x04`) in SDP. Vibeshine captures
+48 kHz S16LE actuator channels 3/4 from its virtual USB audio interface and sends
+5 ms stereo blocks using encrypted control type `0x5601`, unreliable ENet
+channel `0x08`. Both flags and the versioned payload are a coordinated extension
+in these forks; they are not an upstream Moonlight protocol guarantee.
+
+The receive callback validates exact length, version, format, controller range,
+reserved fields and sample count before copying into a bounded per-controller
+queue. It never accesses Session/InputHandler objects that may be tearing down.
+The Linux worker resamples to 3 kHz signed 8-bit stereo with SDL's audio stream,
+then sends SAxense-derived Bluetooth reports through the controller's existing
+hidraw node. Input stays with SDL; no kernel module or BlueZ reconfiguration is
+added on the client. USB and other platforms keep ordinary rumble in this first
+implementation. Native game haptics must originate from the host's controller
+audio endpoint; game soundtrack audio is not a substitute.
+
+Playback drops old/duplicate packets, resets conversion history on packet loss,
+bounds its input and converted queues, sends silence on underflow/idle/removal,
+and joins its worker before SDL closes the controller. It cancels SDL emulated
+rumble when waveform playback starts and suppresses legacy rumble while active;
+LED, motion and adaptive-trigger callbacks retain their own paths. Write failure
+stops that waveform worker and logs the need to reconnect; ordinary controller
+input continues. Hardware coexistence with other applications writing the same
+controller still requires physical testing.
+
+The pinned SAxense source, license, research credit and adaptation notes are in
+[`third-party/saxense`](third-party/saxense/PROVENANCE.md). Every binary embeds the
+original/adapted covered source and both license texts, printable headlessly with
+`--haptics-license`. Hardware-free validation is `tests/haptics/haptics.pro`;
+passing it does not establish actual Bluetooth/game behavior.
+
 See [InputStream.c](moonlight-common-c/moonlight-common-c/src/InputStream.c) and
 [input handlers](app/streaming/input). Mouse movement is coalesced/batched with
 a 1 ms interval; the stream event loop normally sleeps 1 ms when idle, with

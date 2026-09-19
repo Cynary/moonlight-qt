@@ -195,6 +195,7 @@ SOURCES += \
     diagnostics/diagnosticzip.cpp \
     streaming/input/abstouch.cpp \
     streaming/input/gamepad.cpp \
+    streaming/input/dualsensehaptics.cpp \
     streaming/input/input.cpp \
     streaming/input/keyboard.cpp \
     streaming/input/mouse.cpp \
@@ -217,6 +218,8 @@ SOURCES += \
     wm.cpp
 
 HEADERS += \
+    streaming/input/dualsensehaptics.h \
+    ../third-party/saxense/packet.h \
     SDL_compat.h \
     backend/nvaddress.h \
     backend/nvapp.h \
