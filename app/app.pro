@@ -56,7 +56,7 @@ win32 {
     }
 
     INCLUDEPATH += $$PWD/../libs/windows/include
-    LIBS += dcomp.lib advapi32.lib ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib
+    LIBS += dcomp.lib advapi32.lib ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib
 }
 macx:!disable-prebuilts {
     !exists($$PWD/../libs/mac) {
@@ -196,6 +196,7 @@ SOURCES += \
     streaming/input/abstouch.cpp \
     streaming/input/gamepad.cpp \
     streaming/input/dualsensehaptics.cpp \
+    streaming/input/dualsensehid.cpp \
     streaming/input/input.cpp \
     streaming/input/keyboard.cpp \
     streaming/input/mouse.cpp \
@@ -219,6 +220,8 @@ SOURCES += \
 
 HEADERS += \
     streaming/input/dualsensehaptics.h \
+    streaming/input/dualsensehid.h \
+    streaming/input/dualsensetriggers.h \
     ../third-party/saxense/packet.h \
     SDL_compat.h \
     backend/nvaddress.h \
