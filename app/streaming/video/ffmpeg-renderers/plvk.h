@@ -95,6 +95,15 @@ private:
 
     bool createSwapchain(int depth);
     bool createOverlay(pl_overlay* overlay, SDL_Surface* surface);
+    // A retained DRM mapping keeps its VA surface alive, so the surface ID
+    // cannot be recycled while used as this single-entry cache key.
+    AVFrame* m_ReadyDrmFrame = nullptr;
+    void* m_ReadyHwFramesContext = nullptr;
+    uint8_t* m_ReadyVaSurface = nullptr;
+    bool m_DrmMapFailureLogged = false;
+    bool hasReadyDrmFrame(const AVFrame* frame) const;
+    void clearReadyDrmFrame();
+
     bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     void unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     bool populateQueues(int videoFormat);

@@ -1006,3 +1006,26 @@ chain, identify the first boundary that differs from its intended behavior,
 and check how that difference propagates into subsequent frames and feedback.
 That keeps host stalls, local overload, scheduling policy, native behavior,
 and measurement limitations from being conflated.
+
+### Linux VAAPI mapping lifetime (single-map candidate)
+
+On the vrr14-based `fix/vaapi-single-map` branch, the Vulkan presenter's early
+`waitForDecode()` obtains a read-only DRM PRIME mapping through FFmpeg. That
+operation synchronizes the VA surface before exporting it. The presenter retains
+one mapping and its source reference until rendering, cancellation, suspension,
+or replacement by the next frame. Surface ID plus the retained hardware-frame
+context identifies the cached frame; retaining the source prevents surface-ID
+reuse while cached. A stale frame can keep at most this one extra reference until
+the worker processes another frame or cancels.
+
+`prepareFrame()` reuses that mapping, and libplacebo imports the DRM PRIME frame
+rather than mapping the VA surface again. Intel's `vaSyncSurface()` can wait for
+later decoder jobs that read a surface as a reference, so completing one wait
+does not imply that a second wait will be immediate. Avoiding the repeated VA
+mapping removes that dependency from the presentation deadline. libplacebo keeps
+the imported frame alive for its GPU work after the presenter releases its copy.
+
+Export failures retain the original synchronized path. Other decoder formats and
+legacy rendering remain unchanged. This changes the Vulkan presenter's resource
+handling, not the timing controller or its replay policy. Live frame-timing and
+lifecycle validation are required in addition to a successful build.
