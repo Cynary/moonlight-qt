@@ -518,6 +518,28 @@ void testOffsetSlewIgnoresWorkerBacklogAndPreservesHistoricalClock()
            "a genuine epoch rebase must discard old offset state and credit");
 }
 
+void testClockMappingIndependentOfGpuReadiness()
+{
+    auto policy = offsetTestPolicy();
+    policy.playoutOffsetDecoderOutput = 1;
+    VrrTimingController ordinary(config(60, 120), true, policy);
+    VrrTimingController delayed(config(60, 120), true, policy);
+    for (int i = 1; i <= 240; ++i) {
+        const uint32_t timestamp = (i - 1) * 1500;
+        const uint64_t output = decodedTimeForRtp(1000000, timestamp);
+        auto a = frame(i, timestamp, true, output);
+        auto b = frame(i, timestamp, true, output);
+        a.noteGpuReadyUs(output + 4500);
+        b.noteGpuReadyUs(output + (i % 7 ? 4500 : 11000));
+        const auto da = ordinary.schedule(a, a.decodeCompleteUs());
+        const auto db = delayed.schedule(b, b.decodeCompleteUs());
+        expect(ordinary.playoutOffsetUs() == delayed.playoutOffsetUs(),
+               "GPU observation or worker delay must not shift the source clock");
+        expect(da.targetUs >= a.decodeCompleteUs() && db.targetUs >= b.decodeCompleteUs(),
+               "separate clock mapping must not schedule before observed readiness");
+    }
+}
+
 void testOffsetRecoveryRejectsTransitionMinimum()
 {
     // A source discontinuity can contain an unusually early readiness
@@ -4910,6 +4932,7 @@ int main()
     testTimestampModePreservesUnevenHostIntervals();
     testOffsetSlewUsesElapsedTime();
     testOffsetSlewIgnoresWorkerBacklogAndPreservesHistoricalClock();
+    testClockMappingIndependentOfGpuReadiness();
     testOffsetRecoveryRejectsTransitionMinimum();
     testOffsetRecoveryKeepsStartupPaddingAndNativePolicy();
     testTimestampModeStillBoundsCatchUpBursts();

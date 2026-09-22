@@ -55,6 +55,18 @@ struct DirectWaylandRenderer::State {
     wl_shm* shm = nullptr;
     std::set<std::pair<uint32_t, uint64_t>> formats;
     AVFrame* decoded = nullptr;
+    VADRMPRIMESurfaceDescriptor decodedExport {};
+    bool hasDecodedExport = false;
+    void clearDecoded()
+    {
+        if (hasDecodedExport) {
+            for (uint32_t i = 0; i < decodedExport.num_objects; ++i)
+                close(decodedExport.objects[i].fd);
+            decodedExport = {};
+            hasDecodedExport = false;
+        }
+        av_frame_free(&decoded);
+    }
     uint64_t id = 0;
     struct Sample {
         uint64_t id, time;
@@ -281,7 +293,16 @@ struct DirectWaylandRenderer::State {
         }
         VADRMPRIMESurfaceDescriptor desc { };
         VASurfaceID target = mode == 2 ? b->rgb : VASurfaceID(uintptr_t(frame->data[3]));
-        if (vaExportSurfaceHandle(ctx->display, target, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        if (mode == 1 && hasDecodedExport && decoded &&
+            decoded->data[3] == frame->data[3] &&
+            decoded->hw_frames_ctx->data == frame->hw_frames_ctx->data) {
+            // Transfer FD ownership to this import. The retained source frame
+            // prevents surface reuse until the compositor releases its buffer.
+            desc = decodedExport;
+            decodedExport = {};
+            hasDecodedExport = false;
+        }
+        else if (vaExportSurfaceHandle(ctx->display, target, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                 VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &desc)
             != VA_STATUS_SUCCESS) {
             drop(b);
@@ -455,7 +476,7 @@ struct DirectWaylandRenderer::State {
     }
     ~State()
     {
-        av_frame_free(&decoded);
+        clearDecoded();
         if (surface && ready) {
             wl_surface_attach(surface, nullptr, 0, 0);
             wl_surface_commit(surface);
@@ -625,7 +646,7 @@ bool DirectWaylandRenderer::testRenderFrame(AVFrame* f)
     if (!b)
         return false;
     d->drop(b);
-    av_frame_free(&d->decoded);
+    d->clearDecoded();
     return true;
 }
 uint64_t DirectWaylandRenderer::waitForDecode(AVFrame* f)
@@ -654,7 +675,7 @@ uint64_t DirectWaylandRenderer::waitForDecode(AVFrame* f)
                 d->composing = true;
                 ++d->expectedRetirements;
                 ++d->compositionEpoch;
-                av_frame_free(&d->decoded);
+                d->clearDecoded();
                 if (!d->composition->reclaimGamescopeWindow()) {
                     d->fail("Vulkan window handoff failed");
                     return 0;
@@ -679,12 +700,30 @@ uint64_t DirectWaylandRenderer::waitForDecode(AVFrame* f)
     if (d->decoded && d->decoded->data[3] == f->data[3]
         && d->decoded->hw_frames_ctx->data == f->hw_frames_ctx->data)
         return 0;
-    av_frame_free(&d->decoded);
+    d->clearDecoded();
     uint64_t start = LiGetMicroseconds();
     auto* frames = reinterpret_cast<AVHWFramesContext*>(f->hw_frames_ctx->data);
     auto* ctx = reinterpret_cast<AVVAAPIDeviceContext*>(frames->device_ctx->hwctx);
-    if (vaSyncSurface(ctx->display, VASurfaceID(uintptr_t(f->data[3]))) == VA_STATUS_SUCCESS)
+    if (vaSyncSurface(ctx->display, VASurfaceID(uintptr_t(f->data[3]))) == VA_STATUS_SUCCESS) {
         d->decoded = av_frame_clone(f);
+        if (!d->decoded) {
+            d->fail("decoded frame retention failed");
+        }
+        else if (d->mode == 1) {
+            // Intel Xe export also waits for readers of this surface. Export
+            // now, before pacing gives the decoder time to submit a later
+            // frame that uses this one as a reference. Do not export it again
+            // at the presentation deadline.
+            d->hasDecodedExport = vaExportSurfaceHandle(ctx->display,
+                VASurfaceID(uintptr_t(f->data[3])), VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                &d->decodedExport) == VA_STATUS_SUCCESS;
+            if (!d->hasDecodedExport) {
+                d->clearDecoded();
+                d->fail("early decoded surface export failed");
+            }
+        }
+    }
     else
         d->fail("decoder synchronization failed");
     return LiGetMicroseconds() - start;
@@ -722,7 +761,7 @@ VrrPrepareResult DirectWaylandRenderer::prepareFrame(AVFrame* f, uint64_t)
         }
         else if (now - d->bufferSaturationSince >= 250000)
             d->fail("compositor retained the full video buffer pool for 250 ms");
-        av_frame_free(&d->decoded);
+        d->clearDecoded();
         return result;
     }
     if (d->bufferSaturationSince) {
@@ -731,7 +770,7 @@ VrrPrepareResult DirectWaylandRenderer::prepareFrame(AVFrame* f, uint64_t)
         d->bufferSaturationSince = 0;
     }
     d->pending = d->makeBuffer(f);
-    av_frame_free(&d->decoded);
+    d->clearDecoded();
     if (!d->pending) {
         d->fail("buffer import or RGB conversion unavailable");
         return result;
@@ -807,7 +846,7 @@ VrrPresentFeedback DirectWaylandRenderer::cancelFrame()
     if (d->composing) return d->composition->cancelFrame();
     d->drop(d->pending);
     d->pending = nullptr;
-    av_frame_free(&d->decoded);
+    d->clearDecoded();
     VrrPresentFeedback f;
     f.cancelled = true;
     return f;

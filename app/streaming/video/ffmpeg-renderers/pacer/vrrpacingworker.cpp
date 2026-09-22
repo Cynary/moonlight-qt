@@ -161,6 +161,15 @@ bool isUncPath(const char* path)
 }
 #endif
 
+VrrTimingParameters workerTimingParameters(const VrrSessionConfig& config)
+{
+    auto parameters = vrrTimingParametersForSession(config);
+#ifdef Q_OS_LINUX
+    parameters.playoutOffsetDecoderOutput = 1;
+#endif
+    return parameters;
+}
+
 } // namespace
 
 VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
@@ -173,8 +182,12 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
                            presenter->canLatchAdaptivePresent()),
     m_TimingController(std::make_unique<VrrTimingController>(
         config, m_CanLatchPresentation,
-        vrrTimingParametersForSession(config)))
+        workerTimingParameters(config)))
 {
+    if (m_TimingController->parameters().playoutOffsetDecoderOutput &&
+        !m_Config.calibrationKey.empty()) {
+        m_Config.calibrationKey += "-decoder-output-clock-v1";
+    }
     const char* deepTraceEnv = SDL_getenv("MOONLIGHT_VRR_DEEP_TRACE");
     m_DeepTraceEnabled = deepTraceEnv != nullptr && deepTraceEnv[0] == '1';
 
@@ -423,7 +436,13 @@ int VrrPacingWorker::run()
         // the preparation never blocks on the decoder.
         const uint64_t decodeSyncWaitUs = m_Presenter->waitForDecode(
             frame.frame(), frame.decodeBoundary());
-        if (decodeSyncWaitUs > kDecodeSyncNoticeUs) {
+        if (m_TimingController->parameters().playoutOffsetDecoderOutput) {
+            // This is when readiness was observed, not a claim about the
+            // precise instant the GPU finished. Never backdate it by assuming
+            // a zero blocking wait means decoding finished at CPU output.
+            frame.noteGpuReadyUs(LiGetMicroseconds());
+        }
+        else if (decodeSyncWaitUs > kDecodeSyncNoticeUs) {
             // The wait can overlap time already spent in the pacing queue.
             // Keep that queue residence out of the readiness model by adding
             // only the blocking fence cost to immutable decoder output.
