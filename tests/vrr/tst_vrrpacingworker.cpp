@@ -1725,8 +1725,14 @@ void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
     Vrr13::Reserve cachedHistory(20);
     for (int i = 0; i < 256; ++i)
         cachedHistory.observe(4000000, 8000000, Vrr13::Reserve::Second + int64_t(i) * 16667000);
+    const QString profileKey =
+#ifdef Q_OS_LINUX
+        "replay-test-decoder-output-clock-v1";
+#else
+        "replay-test";
+#endif
     expect(Vrr13::saveProfile(QString::fromStdString(cachedConfig.calibrationPath),
-                             "replay-test", cachedHistory), "test calibration must save");
+                             profileKey, cachedHistory), "test calibration must save");
     {
         VrrPacingWorker worker(&backend, cachedConfig, &telemetry);
         expect(worker.start(), "worker must start for deep diagnostics testing");
@@ -1749,11 +1755,18 @@ void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
     const QList<QByteArray> columns = header.split(',');
     const QList<QByteArray> fields = row.split(',');
     expect(columns.size() == fields.size(), "diagnostic columns must align with every value");
-    expect(columns.contains("decoder_output_us") &&
-               fields.value(columns.indexOf("decoder_output_us")).toULongLong() > 0 &&
-               fields.value(columns.indexOf("decoder_output_us")).toULongLong() ==
-                   fields.value(columns.indexOf("decode_complete_us")).toULongLong(),
-           "a frame without a blocking fence wait must keep decoder output as its readiness boundary");
+    const auto decoderOutput = fields.value(columns.indexOf("decoder_output_us")).toULongLong();
+    const auto observedReady = fields.value(columns.indexOf("decode_complete_us")).toULongLong();
+    expect(columns.contains("decoder_output_us") && decoderOutput > 0,
+           "trace must retain the immutable decoder output timestamp");
+#ifdef Q_OS_LINUX
+    expect(observedReady >= decoderOutput &&
+               fields.value(columns.indexOf("param_playout_offset_decoder_output")) == "1",
+           "Linux must record readiness separately and enable CPU-output clock mapping");
+#else
+    expect(observedReady == decoderOutput,
+           "legacy zero-wait readiness must remain decoder output on other platforms");
+#endif
     expect(fields.value(columns.indexOf("session_latency_mode")) ==
                QByteArray::number(cachedConfig.latencyMode) &&
                fields.value(columns.indexOf("calibration_loaded")) == "1" &&
