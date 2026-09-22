@@ -1239,7 +1239,7 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     // this row's policy from immutable session settings and its captured mode.
     auto traceConfig = m_Config;
     traceConfig.latencyMode = row.latencyMode;
-    const VrrTimingParameters parameters = vrrTimingParametersForSession(traceConfig);
+    const VrrTimingParameters parameters = workerTimingParameters(traceConfig);
     const VrrPresentFeedback& feedback = row.feedback;
     const FrameTelemetry& telemetry = row.telemetry;
     const uint64_t nativePresentDurationUs =
