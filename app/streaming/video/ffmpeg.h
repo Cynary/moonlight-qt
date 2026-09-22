@@ -22,6 +22,8 @@ public:
     virtual bool isHardwareAccelerated() override;
     virtual bool isAlwaysFullScreen() override;
     virtual bool isHdrSupported() override;
+    bool isDirectPresentationActive() const override;
+    void setOverlayComposition(bool enabled) override;
     virtual int getDecoderCapabilities() override;
     virtual int getDecoderColorspace() override;
     virtual int getDecoderColorRange() override;

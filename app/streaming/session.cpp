@@ -12,6 +12,9 @@
 
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
+#ifdef HAVE_DIRECT_WAYLAND
+#include "video/ffmpeg-renderers/directwayland.h"
+#endif
 #endif
 
 #ifdef HAVE_SLVIDEO
@@ -2131,7 +2134,33 @@ void Session::exec()
         m_VideoDecoder->notifyWindowChanged(&windowChangeInfo);
     };
 
+    int effectiveDirectVideoMode = m_PresentationSettings.directVideoMode;
+#ifdef HAVE_DIRECT_WAYLAND
+    uint64_t overlayLastVisibleUs = 0;
+    uint64_t overlayLastCheckUs = 0;
+    bool overlayCompositionActive = false;
+#endif
     for (;;) {
+#ifdef HAVE_DIRECT_WAYLAND
+        const uint64_t overlayNowUs = LiGetMicroseconds();
+        if (m_PresentationSettings.directVideoMode != 3 &&
+            (overlayCompositionActive || (m_VideoDecoder && m_VideoDecoder->isDirectPresentationActive())) &&
+            overlayNowUs - overlayLastCheckUs >= 100000) {
+            overlayLastCheckUs = overlayNowUs;
+            const bool visible = DirectWaylandRenderer::overlaysRequireComposition(m_Window);
+            if (visible) overlayLastVisibleUs = overlayNowUs;
+            // Keep Vulkan through short gaps between notifications.
+            const bool compose = visible || (overlayLastVisibleUs && overlayNowUs - overlayLastVisibleUs < 500000);
+            const int desired = compose ? 3 : m_PresentationSettings.directVideoMode;
+            m_VideoDecoder->setOverlayComposition(compose);
+            if (desired != effectiveDirectVideoMode) {
+                effectiveDirectVideoMode = desired;
+                overlayCompositionActive = compose;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Overlay presentation: switching to %s",
+                    compose ? "Vulkan" : "configured direct renderer");
+            }
+        }
+#endif
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -2142,7 +2171,7 @@ void Session::exec()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        if (!SDL_WaitEventTimeout(&event, 1000)) {
+        if (!SDL_WaitEventTimeout(&event, m_PresentationSettings.directVideoMode != 3 ? 100 : 1000)) {
             presence.runCallbacks();
             continue;
         }
