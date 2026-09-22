@@ -201,7 +201,7 @@ private:
                        int vrrDisplayRefreshHz = 0,
                        bool* effectiveVrr = nullptr, bool smoothVrrFrameTiming = true,
                        bool gamescopeMailbox = false, int vrrLatencyMode = 0,
-                       bool gamescopeRepaint = false);
+                       bool gamescopeRepaint = false, int directVideoMode = 0);
 
     static
     void clStageStarting(int stage);
@@ -261,6 +261,7 @@ private:
         bool enableFramePacing = false;
         bool enableVrr = false;
         int vrrLatencyMode = 0;
+        int directVideoMode = 0;
         bool gamescopeMailbox = false;
         bool gamescopeRepaint = false;
         bool smoothVrrFrameTiming = true;

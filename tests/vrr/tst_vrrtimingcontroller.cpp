@@ -238,7 +238,7 @@ void testSourcePlayoutDelayOffsetsProjectedTargets()
                lowLatencyPolicy.playoutPrepareOnArrival == 0 &&
                lowLatencyPolicy.renderStartAfterSubmissionUs == 6000 &&
                lowLatencyPolicy.renderStartMinimumLeadUs == 2500 &&
-               lowLatencyPolicy.renderLeadFloorUs == 3000 &&
+               lowLatencyPolicy.renderLeadFloorUs == 0 &&
                lowLatencyPolicy.playoutSmoothingGainPerMille == 200 &&
                lowLatencyPolicy.playoutSmoothingPeriodAlphaPerMille == 100 &&
                lowLatencyPolicy.playoutSmoothingMaxLagUs == 6000 &&
@@ -1849,6 +1849,32 @@ void testFutureSourceProjectionReseedsPhase()
     expect(!recovered.rebased && recovered.sourceIntervalUs != 0 &&
                recovered.targetUs < nowUs + 2 * 8621,
            "a source projection ahead of decoded local time must reseed phase without discarding cadence");
+}
+
+void testMeasuredPreparationControlsRenderAllowance()
+{
+    const auto session = config(116, 120);
+    VrrTimingController controller(session, true, vrrTimingParametersForSession(session));
+    uint32_t count = 0;
+    auto prepare = [&](uint64_t duration) {
+        const uint64_t now = 1000000 + uint64_t(count) * 8621;
+        auto decision = controller.schedule(frame(count, count * 776, true, now), now);
+        controller.notePreparationDuration(duration);
+        controller.noteSubmission(true, false, decision.targetUs);
+        ++count;
+    };
+    for (int i = 0; i < 32; ++i)
+        prepare(120);
+    expect(controller.renderLeadUs() < 500,
+           "fast preparation must not inherit a fixed render allowance");
+    for (int i = 0; i < 256; ++i)
+        prepare(120);
+    expect(controller.renderLeadUs() < 500,
+           "fast preparation must retain a measured allowance after warmup");
+    for (int i = 0; i < 256; ++i)
+        prepare(4000);
+    expect(controller.renderLeadUs() >= 4000,
+           "preparation allowance must still grow when the renderer becomes slower");
 }
 
 void testDecodeTailAdaptation()
@@ -3828,8 +3854,10 @@ void testPredictionOnlyBufferAdaptation()
     // One active worker honors render-start deadlines and GPU readiness.
     // Delivery, render work and render-wakeup faults each need more padding,
     // even when the backend never supplies any display observation.
+    for (bool nativeProtection : {false, true})
     for (int faultKind : {1, 2, 3}) {
-        VrrTimingController controller(session, true, policy);
+        VrrTimingController controller(session, nativeProtection, policy);
+        uint64_t lastDisplay = 0;
         uint64_t lastSubmission = 0, initial = 0, clean = 0, peak = 0, finalDelay = 0;
         uint64_t maximumLatency = 0, previousDelay = 0;
         bool bounded = true, startupStable = true;
@@ -3852,8 +3880,14 @@ void testPredictionOnlyBufferAdaptation()
             if (i >= 600) peak = std::max(peak, d.playoutDelayUs);
             bounded &= d.playoutDelayUs <= policy.playoutDelayMaximumUs &&
                 (!i || d.playoutDelayUs <= previousDelay + policy.playoutDelayAttackUs) &&
-                (!lastSubmission || submitted >= controller.displayPeriodUs() + lastSubmission);
-            maximumLatency = std::max(maximumLatency, submitted - decoded);
+                (!lastSubmission || submitted >= lastSubmission +
+                    (nativeProtection ? 0 : controller.displayPeriodUs()));
+            // Native FIFO can accept a catch-up submission before the next
+            // refresh boundary, but cannot display it before that boundary.
+            const uint64_t displayed = nativeProtection && lastDisplay ?
+                std::max(submitted, lastDisplay + controller.displayPeriodUs()) : submitted;
+            maximumLatency = std::max(maximumLatency, displayed - decoded);
+            lastDisplay = displayed;
             lastSubmission = submitted;
             previousDelay = finalDelay = d.playoutDelayUs;
         }
@@ -4579,7 +4613,7 @@ void testPresetReadinessTargets()
         const auto policy = vrrTimingParametersForSession(session);
         const uint64_t target = mode == 2 ? 990000 : mode == 1 ? 995000 : 999900;
         const uint64_t window = mode == 2 ? 60000000 : mode == 1 ? 120000000 : 300000000;
-        expect(policy.playoutResponsiveBuffer == 7 &&
+        expect(policy.playoutResponsiveBuffer == 9 &&
                    policy.playoutOnTimeTargetPerMillion == target &&
                    policy.playoutReadinessWindowUs == window,
                "presets must resolve their exact reliability target and bounded history");
@@ -4693,7 +4727,7 @@ void testMeanMissBuffer()
         auto session = config(116, 120);
         session.latencyMode = mode;
         const auto policy = vrrTimingParametersForSession(session);
-        expect(policy.playoutResponsiveBuffer == 7 &&
+        expect(policy.playoutResponsiveBuffer == 9 &&
             policy.playoutMeanMissHoldUs == (mode == 2 ? 6000000 : mode == 1 ? 8000000 : 10000000) &&
             policy.playoutMeanMissReleaseUsPerSecond == (mode == 0 ? 50 : mode == 2 ? 125 : 100),
             "every preset must select the production interval queue and record its release policy");
@@ -4753,8 +4787,82 @@ void testIntervalQualityUsesPresetHistory()
            "the active quality score must retain the selected preset history duration");
 }
 
+void testIntentionalPreparationWaitDoesNotInflateBuffer()
+{
+    const auto session = config(100, 120);
+    const auto policy = vrrTimingParametersForSession(session);
+    VrrTimingController early(session, true, policy);
+    VrrTimingController deferred(session, true, policy);
+    for (int i = 0; i < 12000; ++i) {
+        const uint32_t rtp = uint32_t(i * 900);
+        const uint64_t decoded = decodedTimeForRtp(1000000, rtp);
+        const auto a = early.schedule(frame(i, rtp, true, decoded), decoded);
+        const auto b = deferred.schedule(frame(i, rtp, true, decoded), decoded);
+        expect(a.playoutDelayUs == b.playoutDelayUs,
+               "intentional preparation scheduling must not change input-buffer demand");
+        const uint64_t completed = std::max(a.targetUs, decoded + 1000) + (i % 2 ? 2000 : 0);
+        early.notePreparationDuration(1000, 0, decoded + 1000);
+        deferred.notePreparationDuration(1000, 0, completed);
+        early.noteSubmission(true, false, completed);
+        deferred.noteSubmission(true, false, completed);
+    }
+}
+
+void testReadinessAttributedRelease()
+{
+    for (bool causalRelease : {false, true}) {
+        Vrr13::IntervalBuffer buffer;
+        uint64_t applied = 6000;
+        // A slow display's alternating submission delay lowers the reported
+        // quality, despite every input frame being ready before its deadline.
+        for (uint64_t i = 1; i <= 12000; ++i) {
+            const uint64_t intended = 1000000 + i * 10000;
+            const uint64_t deadline = intended + applied;
+            buffer.observe({i, intended, intended + (i % 2 ? 2000 : 0),
+                deadline, intended - 1000, applied, true, true},
+                1000, 16000, 8000000, 100, true, 995000, 500, 120000000, causalRelease);
+            applied = buffer.demand(applied);
+        }
+        expect(buffer.stats().qualityPercent() < 99.5,
+            "unrelated display jitter must remain visible in the quality score");
+        expect(causalRelease ? applied == 1000 : applied == 6000,
+            "timely inputs must release old protection despite non-readiness score debt; replay retains the old policy");
+    }
+    Vrr13::IntervalBuffer interrupted;
+    uint64_t interruptedApplied = 6000;
+    for (uint64_t i = 1; i <= 12000; ++i) {
+        const uint64_t intended = 1000000 + i * 10000;
+        interrupted.observe({i + i / 100, intended, intended,
+            intended + interruptedApplied, intended - 1000,
+            interruptedApplied, true, true},
+            1000, 16000, 8000000, 100, true, 995000, 500, 120000000, true);
+        interruptedApplied = interrupted.demand(interruptedApplied);
+    }
+    expect(interruptedApplied == 1000,
+        "occasional skipped frames must not erase accumulated clean release evidence");
+    Vrr13::IntervalBuffer buffer;
+    uint64_t applied = 1000;
+    for (uint64_t i = 1; i <= 2000; ++i) {
+        const uint64_t intended = 1000000 + i * 10000;
+        const uint64_t ready = intended + (i % 2 ? 5000 : 0);
+        buffer.observe({i, intended, std::max(intended + applied, ready),
+            intended + applied, ready, applied, true, true},
+            1000, 8000, 8000000, 100, true, 995000, 500, 120000000, true);
+        applied = buffer.demand(applied);
+    }
+    expect(applied > 1000 && applied <= 8000,
+        "genuine readiness jitter must still acquire bounded protection");
+    const auto beforeGap = applied;
+    buffer.observe({3000, 100000000, 100000000, 100000000, 99000000,
+        applied, true, true}, 1000, 8000, 8000000, 100, true, 995000, 500, 120000000, true);
+    expect(buffer.demand(applied) == beforeGap,
+        "an unobserved gap must not count as clean release time");
+}
+
 int main()
 {
+    testIntentionalPreparationWaitDoesNotInflateBuffer();
+    testReadinessAttributedRelease();
     testIntervalQualityBuffer();
     testIntervalQualityUsesPresetHistory();
     testPresetIntervalTolerances();
@@ -4826,6 +4934,7 @@ int main()
     testCadenceGapAndRateChange();
     testFutureSourceProjectionReseedsPhase();
     testDecodeTailAdaptation();
+    testMeasuredPreparationControlsRenderAllowance();
     testRateChangeReseedsReadinessBudget();
     testFractionalQuantizedCadenceLearning();
     testCutsceneRecoveryAndHitchIsolation();

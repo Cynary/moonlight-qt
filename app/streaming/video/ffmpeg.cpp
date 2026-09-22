@@ -14,6 +14,9 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#ifdef HAVE_DIRECT_WAYLAND
+#include "ffmpeg-renderers/directwayland.h"
+#endif
 #include "ffmpeg-renderers/sdlvid.h"
 #include "ffmpeg-renderers/genhwaccel.h"
 #include "vrrrenderpolicy.h"
@@ -388,6 +391,16 @@ bool FFmpegVideoDecoder::initializeRendererInternal(IFFmpegRenderer* renderer, P
 
 bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool useAlternateFrontend)
 {
+#ifdef HAVE_DIRECT_WAYLAND
+    if (params->directVideoMode != 3 && m_BackendRenderer->getRendererType() == IFFmpegRenderer::RendererType::VAAPI) {
+        m_FrontendRenderer = new DirectWaylandRenderer(m_BackendRenderer, params->directVideoMode);
+        if (initializeRendererInternal(m_FrontendRenderer, params)) return true;
+        delete m_FrontendRenderer;
+        m_FrontendRenderer = nullptr;
+        if (params->directVideoMode != 0) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            "Requested direct presentation is unavailable; trying existing renderers");
+    }
+#endif
     bool glIsSlow;
     bool vulkanIsSlow;
 #ifdef HAVE_LIBPLACEBO_VULKAN
