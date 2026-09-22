@@ -473,19 +473,20 @@ int VrrPacingWorker::run()
         // render-bound client it only deepened the standing backlog.
         const uint64_t scheduleNowUs = LiGetMicroseconds();
         telemetry.staleCheckUs = scheduleNowUs;
-        const uint64_t scheduleAgeUs = scheduleNowUs >=
-                frame.decodeCompleteUs() ?
-            scheduleNowUs - frame.decodeCompleteUs() : 0;
+        const bool observedReadiness =
+            m_TimingController->parameters().playoutOffsetDecoderOutput != 0;
+        const uint64_t contentOriginUs = observedReadiness ?
+            frame.decoderOutputUs() : frame.decodeCompleteUs();
+        const uint64_t scheduleAgeUs = positiveDifference(scheduleNowUs, contentOriginUs);
         telemetry.staleAgeUs = scheduleAgeUs;
         const bool metronome =
             m_TimingController->parameters().playoutMetronomeEnabled != 0;
         const bool latencyFix = m_TimingController->latencyFixActive();
-        // The optional near-ceiling policy measures transport occupancy from
-        // admission. Other modes retain their existing GPU-readiness origin
-        // for stale-work policy; reporting always uses immutable decoder
-        // output below.
+        // Observing GPU readiness now must not rejuvenate content that was
+        // already queued. New-policy sessions measure content age from CPU
+        // output; historical policy retains its old readiness origin.
         const uint64_t ageOriginUs = latencyFix ?
-            queuedFrame.trace.arrivalUs : frame.decodeCompleteUs();
+            queuedFrame.trace.arrivalUs : contentOriginUs;
         const uint64_t ageUs = positiveDifference(scheduleNowUs, ageOriginUs);
         if (hasQueuedFrame() && VrrFrameDropPolicy::beforeRender(
                 decision, m_TimingController->displayPeriodUs(), ageUs, metronome, latencyFix)) {

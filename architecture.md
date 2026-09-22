@@ -2186,7 +2186,9 @@ post-synchronization observation time, including a zero-wait observation. The
 latter is an upper bound on GPU readiness, not a hardware completion timestamp.
 GPU waits and worker scheduling cannot backdate the clock observation. Adaptive
 pacing and target clamping retain their existing policy; targets never precede
-observed readiness. This policy uses a separate calibration key.
+observed readiness. Stale-frame age uses immutable decoder output, so observing
+readiness does not reset the age of queued content. This policy uses a separate
+calibration key.
 
 This includes early retained YUV export. The raw parameter defaults to zero
 for replay compatibility; the Linux worker enables it for live sessions.
