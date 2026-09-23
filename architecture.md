@@ -2140,3 +2140,20 @@ The latest completed live capture (20260911-181549-892) fails original-deadline
 replay at frame 8355 in both the old and new binary, exit 3; no live A/B or
 physical smoothness improvement is established. Existing history_* trace fields
 refer to five-minute diagnostics, not the new live release gate.
+
+### Linux VAAPI mapping lifetime (Moonmachine patch)
+
+The Vulkan presenter's early `waitForDecode()` obtains a read-only DRM PRIME
+mapping through FFmpeg, synchronizing the VA surface before export. It retains
+one mapping and its source reference until rendering, cancellation, suspension,
+or replacement by the next frame. Surface ID plus the retained hardware-frame
+context identifies the cached frame; retaining the source prevents surface-ID
+reuse while cached.
+
+`prepareFrame()` reuses the mapping. libplacebo imports the DRM PRIME frame
+instead of mapping the VA surface again, and retains its own reference for GPU
+work. Intel's `vaSyncSurface()` can otherwise wait for later decoder jobs that
+read the same surface as a reference, even when an earlier wait completed.
+
+Export failure uses the existing synchronized path. This patch changes frame
+resource handling; it does not change the timing controller or replay policy.
