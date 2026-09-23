@@ -1021,6 +1021,21 @@ bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary *
     return true;
 }
 
+bool PlVkRenderer::hasReadyDrmFrame(const AVFrame* frame) const
+{
+    return m_ReadyDrmFrame != nullptr && frame != nullptr &&
+        frame->format == AV_PIX_FMT_VAAPI && frame->hw_frames_ctx != nullptr &&
+        m_ReadyHwFramesContext == frame->hw_frames_ctx->data &&
+        m_ReadyVaSurface == frame->data[3];
+}
+
+void PlVkRenderer::clearReadyDrmFrame()
+{
+    av_frame_free(&m_ReadyDrmFrame);
+    m_ReadyHwFramesContext = nullptr;
+    m_ReadyVaSurface = nullptr;
+}
+
 bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
 {
 #ifdef Q_OS_DARWIN
@@ -1033,7 +1048,10 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
 #endif
     {
         pl_avframe_params mapParams = {};
-        mapParams.frame = frame;
+        // The early VAAPI mapping already synchronized decode. Mapping the VA
+        // surface again can wait for later decodes that only read it as a
+        // reference. Import the retained DRM PRIME frame without another sync.
+        mapParams.frame = hasReadyDrmFrame(frame) ? m_ReadyDrmFrame : frame;
         mapParams.tex = m_Textures;
         if (!pl_map_avframe_ex(m_Vulkan->gpu, mappedFrame, &mapParams)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1397,12 +1415,44 @@ uint64_t PlVkRenderer::waitForDecode(AVFrame* frame)
             hwFrameCtx->device_ctx->type != AV_HWDEVICE_TYPE_VAAPI) {
         return 0;
     }
-    auto vaDeviceContext = (AVVAAPIDeviceContext*)hwFrameCtx->device_ctx->hwctx;
+    if (hasReadyDrmFrame(frame)) {
+        return 0;
+    }
+    clearReadyDrmFrame();
     const uint64_t startUs = LiGetMicroseconds();
-    // libplacebo syncs the surface again when it imports the frame; that
-    // second sync returns at once because this one already waited.
-    vaSyncSurface(vaDeviceContext->display,
-                  (VASurfaceID)(uintptr_t)frame->data[3]);
+    AVFrame* mapped = av_frame_alloc();
+    if (mapped != nullptr) {
+        mapped->format = AV_PIX_FMT_DRM_PRIME;
+        mapped->width = frame->width;
+        mapped->height = frame->height;
+        mapped->hw_frames_ctx = av_buffer_ref(frame->hw_frames_ctx);
+        // FFmpeg synchronizes before exporting a READ mapping and retains a
+        // reference to the source surface for the mapping's lifetime.
+        if (mapped->hw_frames_ctx != nullptr &&
+                av_hwframe_map(mapped, frame,
+                               AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT) >= 0 &&
+                av_frame_copy_props(mapped, frame) >= 0) {
+            m_ReadyDrmFrame = mapped;
+            m_ReadyHwFramesContext = frame->hw_frames_ctx->data;
+            m_ReadyVaSurface = frame->data[3];
+        }
+        else {
+            av_frame_free(&mapped);
+        }
+    }
+    if (m_ReadyDrmFrame == nullptr) {
+        // Preserve the original synchronized import path on devices that
+        // cannot export a DRM PRIME surface. Never treat export failure as
+        // permission to read an unfinished decoder surface.
+        if (!m_DrmMapFailureLogged) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Early VAAPI DRM mapping failed; using synchronized import");
+            m_DrmMapFailureLogged = true;
+        }
+        auto vaDeviceContext = (AVVAAPIDeviceContext*)hwFrameCtx->device_ctx->hwctx;
+        vaSyncSurface(vaDeviceContext->display,
+                      (VASurfaceID)(uintptr_t)frame->data[3]);
+    }
     const uint64_t endUs = LiGetMicroseconds();
     return endUs >= startUs ? endUs - startUs : 0;
 #else
@@ -1577,6 +1627,8 @@ VrrPrepareResult PlVkRenderer::prepareFrame(AVFrame* frame,
     m_VrrRenderSucceeded = false;
     m_VrrRenderTimingActive = false;
     renderFrame(frame);
+    // libplacebo retains the imported frame for any outstanding GPU work.
+    clearReadyDrmFrame();
     const uint64_t renderEndUs = LiGetMicroseconds();
     result.renderUs = renderEndUs >= acquireEndUs ? renderEndUs - acquireEndUs : 0;
 
@@ -1726,6 +1778,7 @@ VrrPresentFeedback PlVkRenderer::presentAdaptive(const VrrPresentRequest& reques
 
 bool PlVkRenderer::cancelVrrFrame()
 {
+    clearReadyDrmFrame();
     const bool hadPendingFrame = m_HasPendingSwapchainFrame;
     m_VrrPreparingFrame = false;
     m_VrrFramePrepared = false;
@@ -1776,6 +1829,7 @@ void PlVkRenderer::setSuspended(bool suspended)
     if (m_PresentationFeedback) m_PresentationFeedback->clear();
 #endif
     m_VrrSuspended = suspended;
+    if (suspended) clearReadyDrmFrame();
     if (!suspended) {
         // Re-run resize/start-frame after restoration without replacing the
         // persistent swapchain.
