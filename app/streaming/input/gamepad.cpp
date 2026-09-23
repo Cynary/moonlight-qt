@@ -493,6 +493,14 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         char guidStr[33];
         uint32_t hapticCaps;
 
+        // The native transport carries this device in full. Sending SDL's
+        // reduced gamepad representation too creates a second host controller.
+        if (m_NativeSteam && SDL_JoystickGetDeviceVendor(event->which) == 0x28de &&
+            SDL_JoystickGetDeviceProduct(event->which) == 0x1304) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Steam Controller reserved for native transport");
+            return;
+        }
+
         controller = SDL_GameControllerOpen(event->which);
         if (controller == NULL) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -997,6 +1005,10 @@ int SdlInputHandler::getAttachedGamepadMask()
     count = mask = 0;
     int numJoysticks = SDL_NumJoysticks();
     for (int i = 0; i < numJoysticks; i++) {
+        if (m_NativeSteam && SDL_JoystickGetDeviceVendor(i) == 0x28de &&
+            SDL_JoystickGetDeviceProduct(i) == 0x1304) {
+            continue;
+        }
         if (SDL_IsGameController(i)) {
             char guidStr[33];
             SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),

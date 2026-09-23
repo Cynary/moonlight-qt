@@ -84,7 +84,7 @@ struct DualSenseOutputReport{
 class SdlInputHandler
 {
 public:
-    explicit SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight);
+    explicit SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight, bool nativeSteam = false);
 
     ~SdlInputHandler();
 
@@ -204,6 +204,7 @@ private:
     Uint32 dragTimerCallback(Uint32 interval, void* param);
 
     SDL_Window* m_Window;
+    bool m_NativeSteam;
     bool m_MultiController;
     bool m_GamepadMouse;
     bool m_SwapMouseButtons;

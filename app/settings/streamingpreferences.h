@@ -148,6 +148,7 @@ public:
     Q_PROPERTY(bool smoothVrrFrameTiming MEMBER smoothVrrFrameTiming NOTIFY smoothVrrFrameTimingChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
+    Q_PROPERTY(bool nativeSteamController MEMBER nativeSteamController NOTIFY nativeSteamControllerChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
@@ -201,6 +202,7 @@ public:
     bool smoothVrrFrameTiming;
     bool gameOptimizations;
     bool playAudioOnHost;
+    bool nativeSteamController;
     bool multiController;
     bool enableMdns;
     bool quitAppAfter;
@@ -244,6 +246,7 @@ signals:
     void smoothVrrFrameTimingChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
+    void nativeSteamControllerChanged();
     void multiControllerChanged();
     void unsupportedFpsChanged();
     void enableMdnsChanged();

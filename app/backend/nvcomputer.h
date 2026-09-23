@@ -98,6 +98,7 @@ public:
     QVector<NvDisplayMode> displayModes;
     int maxLumaPixelsHEVC;
     int serverCodecModeSupport;
+    unsigned int nativeControllerVersion=0;
     QString gpuModel;
     bool isSupportedServerVersion;
     // Optional /serverinfo extension; absent fields never imply integration.

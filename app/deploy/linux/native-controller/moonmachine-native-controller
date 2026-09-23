@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Physical endpoint helper; Moonlight carries reports over its encrypted connection."""
+import os,sys,fcntl,selectors,pathlib
+from imu_clock import ImuClock
+clock=ImuClock()
+node=pathlib.Path(sys.argv[1]).name
+identity=(pathlib.Path("/sys/class/hidraw")/node/"device/uevent").read_text()
+if "HID_ID=0003:000028DE:00001304" not in identity:
+ raise SystemExit("Refusing non-puck endpoint")
+fd=os.open(sys.argv[1],os.O_RDWR|os.O_NONBLOCK)
+s=selectors.DefaultSelector();s.register(fd,selectors.EVENT_READ);s.register(sys.stdin,selectors.EVENT_READ)
+allowed={0x81,0x82,0x83,0x84,0x85,0x87,0x89,0x8a,0x8b,0x8c,0x8f,0xa1,0xaa,0xab,0xae,0xba,0xc4,0xed,0xf2,0xc1,0xe2}
+pending=b''
+print('READY',flush=True)
+while True:
+ for key,_ in s.select():
+  if key.fd==fd:
+   b=os.read(fd,64)
+   if b and b[0] in (0x42,0x43,0x44,0x45,0x79,0x7b):print('I '+clock.normalize(b).hex(),flush=True)
+  else:
+   chunk=os.read(sys.stdin.fileno(),65536)
+   if not chunk:sys.exit(0)
+   pending+=chunk
+   if len(pending)>65536:raise ValueError('control input too large')
+   while b'\n' in pending:
+    line,pending=pending.split(b'\n',1)
+    if line.strip()==b'X':sys.exit(0)
+    _,seq,op,hexdata=line.decode().split();op=int(op);b=bytearray.fromhex(hexdata)
+    try:
+     if op==1:
+      if len(b)!=64 or b[0] not in (1,2):raise ValueError('bad get')
+      fcntl.ioctl(fd,0xc0404807,b,True)
+     elif op==2:
+      if len(b)!=64 or not ((b[0]==1 and b[1] in allowed and b[2]<=61) or (b[0]==2 and ((b[1] in (0xa3,0xb4,0x83) and b[2]==0) or (b[1]==0xf3 and b[2]<=1)))):raise ValueError('blocked feature')
+      fcntl.ioctl(fd,0xc0404806,b,True)
+     elif op==3:
+      lengths={0x80:10,0x81:8,0x82:4,0x83:10,0x84:9,0x85:4}
+      if not b or b[0] not in lengths or len(b) not in (lengths[b[0]],64):raise ValueError('bad output')
+      os.write(fd,b)
+     else:raise ValueError('blocked operation')
+     print('R '+seq+' 0 '+(b.hex() if op==1 else '-'),flush=True)
+    except (OSError,ValueError) as e:
+     print('R '+seq+' -1 -',flush=True);print(str(e),file=sys.stderr,flush=True)

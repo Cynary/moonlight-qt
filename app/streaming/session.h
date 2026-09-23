@@ -1,3 +1,4 @@
+#include "input/nativesteam.h"
 #pragma once
 
 #include <QSemaphore>
@@ -312,6 +313,9 @@ private:
     Overlay::OverlayManager m_OverlayManager;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
+    static void clNativeController(const uint8_t* data,unsigned size);
+    NativeSteam m_NativeSteam;
+    QString m_NativeSteamDevice;
     static Session* s_ActiveSession;
     static QSemaphore s_ActiveSessionSemaphore;
 };

@@ -147,6 +147,7 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         }
     }
 
+    nativeControllerVersion = NvHTTP::getXmlString(serverInfo,"MoonmachineNativeController").toUInt();
     QString codecSupport = NvHTTP::getXmlString(serverInfo, "ServerCodecModeSupport");
     if (!codecSupport.isEmpty()) {
         this->serverCodecModeSupport = codecSupport.toInt();
@@ -567,6 +568,7 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(externalPort);
     ASSIGN_IF_CHANGED(pairState);
     ASSIGN_IF_CHANGED(serverCodecModeSupport);
+    ASSIGN_IF_CHANGED(nativeControllerVersion);
     ASSIGN_IF_CHANGED(frameLimiterSupported);
     ASSIGN_IF_CHANGED(frameLimiterEnabled);
     ASSIGN_IF_CHANGED(virtualDisplayFrameLimiterEnabled);

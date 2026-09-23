@@ -2195,3 +2195,14 @@ for replay compatibility; the Linux worker enables it for live sessions.
 Other platforms retain their previous policy. Core regression coverage compares identical CPU/source timestamps with
 4.5 ms versus intermittently 11 ms readiness observations and requires unchanged
 clock mapping with targets at or after readiness.
+
+## Native Steam Controller extension
+
+The opt-in Linux native controller path owns a per-session helper process and
+uses versioned messages on the existing encrypted control connection. Input
+reports go to the Windows virtual HID driver through Vibepollo; bounded feature
+requests and responses travel in both directions. Session cleanup joins the
+helper worker before stopping the connection. The selected physical controller
+is excluded from SDL gamepad forwarding. See [native controller notes](docs/native-steam-controller.md)
+for the experimental status and validation limits. Video and VRR policy are
+unchanged by this extension.

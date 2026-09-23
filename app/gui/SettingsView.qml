@@ -1609,6 +1609,19 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: nativeSteamControllerCheck
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    text: qsTr("Forward native Steam Controller (experimental)")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.nativeSteamController
+                    onCheckedChanged: StreamingPreferences.nativeSteamController = checked
+                    hoverEnabled: true
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("For the 2026 Steam Controller with its USB puck. Requires a matching Vibepollo host and virtual controller driver. Forwards the native controls to Windows Steam Input.")
+                }
+
+                CheckBox {
                     id: singleControllerCheck
                     width: parent.width
                     text: qsTr("Force gamepad #1 always connected")
