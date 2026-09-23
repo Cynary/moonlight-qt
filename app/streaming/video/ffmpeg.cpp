@@ -83,6 +83,17 @@ bool FFmpegVideoDecoder::isHdrSupported()
     return m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_HDR_SUPPORT;
 }
 
+bool FFmpegVideoDecoder::isDirectPresentationActive() const
+{
+    return m_FrontendRenderer &&
+        m_FrontendRenderer->getRendererType() == IFFmpegRenderer::RendererType::DirectWayland;
+}
+
+void FFmpegVideoDecoder::setOverlayComposition(bool enabled)
+{
+    if (m_FrontendRenderer) m_FrontendRenderer->setOverlayComposition(enabled);
+}
+
 void FFmpegVideoDecoder::setHdrMode(bool enabled)
 {
     m_FrontendRenderer->setHdrMode(enabled);

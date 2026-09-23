@@ -130,6 +130,8 @@ public:
     virtual bool isHardwareAccelerated() = 0;
     virtual bool isAlwaysFullScreen() = 0;
     virtual bool isHdrSupported() = 0;
+    virtual bool isDirectPresentationActive() const { return false; }
+    virtual void setOverlayComposition(bool) {}
     virtual int getDecoderCapabilities() = 0;
     virtual int getDecoderColorspace() = 0;
     virtual int getDecoderColorRange() = 0;

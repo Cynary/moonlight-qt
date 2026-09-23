@@ -8,6 +8,7 @@
 class DirectWaylandRenderer final : public IFFmpegRenderer, public IVrrFramePresenter {
 public:
     DirectWaylandRenderer(IFFmpegRenderer* backend, int mode);
+    static bool overlaysRequireComposition(SDL_Window* window);
     ~DirectWaylandRenderer() override;
     bool initialize(PDECODER_PARAMETERS params) override;
     bool prepareDecoderContext(AVCodecContext*, AVDictionary**) override { return true; }
@@ -15,11 +16,14 @@ public:
     void renderFrame(AVFrame*) override;
     uint64_t waitForDecode(AVFrame*) override;
     VrrPrepareResult prepareFrame(AVFrame*, uint64_t) override;
+    VrrPrepareResult prepareFrame(AVFrame*, uint64_t, const VrrPresentRequest&) override;
     VrrPresentFeedback presentAdaptive(const VrrPresentRequest&) override;
     VrrPresentFeedback cancelFrame() override;
     void setSuspended(bool) override;
     bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
     void notifyOverlayUpdated(Overlay::OverlayType) override;
+    void setOverlayComposition(bool) override;
+    void cleanupRenderContext() override;
     IVrrFramePresenter* getVrrFramePresenter() override { return this; }
     VrrFallbackReason checkSupport() const override;
     bool canLatchAdaptivePresent() const override { return true; }
