@@ -1,4 +1,5 @@
 #include "directwayland.h"
+#include "plvk.h"
 #include "protocols/gamescope-swapchain-client-protocol.h"
 #include "protocols/linux-dmabuf-unstable-v1-client-protocol.h"
 #include "protocols/wlr-layer-shell-client-protocol.h"
@@ -29,7 +30,14 @@ static std::atomic<bool> directFailed { false };
 struct DirectWaylandRenderer::State {
     IFFmpegRenderer* backend;
     int mode, width = 0, height = 0;
+    uint32_t yuvFormat = DRM_FORMAT_XVYU2101010;
     bool ready = false, testOnly = false, failed = false, ownsDisplay = false;
+    std::unique_ptr<PlVkRenderer> composition;
+    std::atomic<bool> compositionRequested { false };
+    bool composing = false;
+    bool compositionWarmed = false;
+    unsigned expectedRetirements = 0;
+    uint64_t compositionEpoch = 0;
     uint32_t xWindow = 0, xServer = 0;
     std::vector<VASurfaceID> freeRgb;
     std::atomic<bool> suspended { false };
@@ -191,7 +199,9 @@ struct DirectWaylandRenderer::State {
     static void cycle(void*, gamescope_swapchain*, uint32_t, uint32_t) { }
     static void retired(void* data, gamescope_swapchain*)
     {
-        static_cast<State*>(data)->fail("swapchain retired");
+        auto* s = static_cast<State*>(data);
+        if (s->expectedRetirements) --s->expectedRetirements;
+        else if (!s->composing) s->fail("swapchain retired");
     }
     bool convertRgb(AVFrame* frame, Buffer* b)
     {
@@ -245,14 +255,17 @@ struct DirectWaylandRenderer::State {
         vaDestroyBuffer(va, param);
         return ok && vaSyncSurface(va, b->rgb) == VA_STATUS_SUCCESS;
     }
-    Buffer* makeBuffer(AVFrame* frame)
+    Buffer* makeBuffer(AVFrame* frame, bool validateColour = true)
     {
         if (!frame || frame->format != AV_PIX_FMT_VAAPI || !frame->hw_frames_ctx)
             return nullptr;
-        if ((frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_SMPTE2084)
+        if (validateColour && ((frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_SMPTE2084)
             || frame->color_range == AVCOL_RANGE_JPEG
-            || (frame->colorspace != AVCOL_SPC_UNSPECIFIED && frame->colorspace != AVCOL_SPC_BT2020_NCL))
+            || (frame->colorspace != AVCOL_SPC_UNSPECIFIED && frame->colorspace != AVCOL_SPC_BT2020_NCL)))
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Direct colour rejected: trc=%d range=%d space=%d test=%d", frame->color_trc, frame->color_range, frame->colorspace, testOnly);
             return nullptr;
+        }
         auto* b = new Buffer { this };
         buffers.insert(b);
         b->frame = av_frame_clone(frame);
@@ -279,11 +292,12 @@ struct DirectWaylandRenderer::State {
             format = DRM_FORMAT_XVYU2101010;
         bool valid = desc.num_layers == 1 && desc.num_objects > 0 && desc.num_objects <= 4
             && desc.layers[0].num_planes > 0 && desc.layers[0].num_planes <= 4;
-        valid = valid && (mode == 2 ? format == DRM_FORMAT_ABGR2101010 : format == DRM_FORMAT_XVYU2101010);
+        valid = valid && (mode == 2 ? format == DRM_FORMAT_ABGR2101010 : format == yuvFormat);
         for (uint32_t i = 0; valid && i < desc.layers[0].num_planes; i++) {
             auto o = desc.layers[0].object_index[i];
             valid = o < desc.num_objects && formats.count({ format, desc.objects[o].drm_format_modifier });
         }
+        if (!valid) SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Direct export rejected: format=%08x expected=%08x layers=%u objects=%u planes=%u modifier=%llx test=%d", format, yuvFormat, desc.num_layers, desc.num_objects, desc.layers[0].num_planes, (unsigned long long)desc.objects[0].drm_format_modifier, testOnly);
         if (valid) {
             auto* p = zwp_linux_dmabuf_v1_create_params(dma);
             for (uint32_t i = 0; i < desc.layers[0].num_planes; i++) {
@@ -302,6 +316,7 @@ struct DirectWaylandRenderer::State {
             b->proxy = importedBuffer.buffer;
             zwp_linux_buffer_params_v1_destroy(p);
             valid = b->proxy != nullptr;
+            if (!valid) SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Direct compositor rejected import: format=%08x modifier=%llx size=%dx%d", format, (unsigned long long)desc.objects[0].drm_format_modifier, frame->width, frame->height);
             if (valid) {
                 static const wl_buffer_listener listener { released };
                 wl_buffer_add_listener(b->proxy, &listener, b);
@@ -501,9 +516,16 @@ QString DirectWaylandRenderer::getCalibrationIdentity()
 }
 bool DirectWaylandRenderer::initialize(PDECODER_PARAMETERS p)
 {
-    if (directFailed || p->videoFormat != VIDEO_FORMAT_H265_REXT10_444
+    if (directFailed || (p->videoFormat != VIDEO_FORMAT_H265_REXT10_444
+                        && p->videoFormat != VIDEO_FORMAT_H265_MAIN10)
         || d->backend->getRendererType() != RendererType::VAAPI)
         return false;
+    if (!p->testOnly) {
+        // Create Vulkan before claiming the window with the direct surface.
+        // Keep its device, shader cache and imported textures across switches.
+        d->composition = std::make_unique<PlVkRenderer>(AV_HWDEVICE_TYPE_NONE, d->backend);
+        if (!d->composition->initialize(p)) return false;
+    }
     SDL_SysWMinfo info { };
     SDL_VERSION(&info.version);
     if (!SDL_GetWindowWMInfo(p->window, &info))
@@ -541,6 +563,8 @@ bool DirectWaylandRenderer::initialize(PDECODER_PARAMETERS p)
         return false;
     if (!d->display)
         return false;
+    // The handoff currently uses Gamescope's Xwayland content override.
+    if (d->composition && !d->xWindow) return false;
     int w = 0, h = 0;
     SDL_GetWindowSize(p->window, &w, &h);
     if (!p->testOnly && (w != p->width || h != p->height))
@@ -564,7 +588,8 @@ bool DirectWaylandRenderer::initialize(PDECODER_PARAMETERS p)
         return false;
     if (!d->factory || !d->dma || !d->shm || !d->compositor || !d->layerShell)
         return false;
-    uint32_t format = d->mode == 2 ? DRM_FORMAT_ABGR2101010 : DRM_FORMAT_XVYU2101010;
+    d->yuvFormat = p->videoFormat == VIDEO_FORMAT_H265_MAIN10 ? DRM_FORMAT_P010 : DRM_FORMAT_XVYU2101010;
+    uint32_t format = d->mode == 2 ? DRM_FORMAT_ABGR2101010 : d->yuvFormat;
     if (std::none_of(d->formats.begin(), d->formats.end(), [format](auto f) { return f.first == format; }))
         return false;
     if (d->ownsDisplay)
@@ -594,7 +619,9 @@ bool DirectWaylandRenderer::initialize(PDECODER_PARAMETERS p)
 bool DirectWaylandRenderer::testRenderFrame(AVFrame* f)
 {
     waitForDecode(f);
-    auto* b = d->makeBuffer(f);
+    // The built-in decoder probe is SDR even for an HDR stream. Import it to
+    // validate the buffer layout without treating it as a live HDR frame.
+    auto* b = d->makeBuffer(f, false);
     if (!b)
         return false;
     d->drop(b);
@@ -603,6 +630,50 @@ bool DirectWaylandRenderer::testRenderFrame(AVFrame* f)
 }
 uint64_t DirectWaylandRenderer::waitForDecode(AVFrame* f)
 {
+    if (d->composition) {
+        d->pump();
+        if (!d->compositionWarmed && f && f->width == d->width && f->height == d->height &&
+            f->color_trc == AVCOL_TRC_SMPTE2084) {
+            const auto start = LiGetMicroseconds();
+            d->composing = true;
+            ++d->expectedRetirements;
+            d->composition->waitForDecode(f);
+            const auto prepared = d->composition->prepareFrame(f, 0);
+            d->composition->cancelFrame();
+            d->pump();
+            gamescope_swapchain_override_window_content(d->swapchain, d->xServer, d->xWindow);
+            wl_display_flush(d->display);
+            d->composing = false;
+            d->compositionWarmed = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Vulkan startup warmup: %llu us, prepared=%d",
+                (unsigned long long)(LiGetMicroseconds() - start), prepared.prepared);
+        }
+        const bool compose = d->compositionRequested.load();
+        if (compose != d->composing && !d->pending) {
+            if (compose) {
+                d->composing = true;
+                ++d->expectedRetirements;
+                ++d->compositionEpoch;
+                av_frame_free(&d->decoded);
+                if (!d->composition->reclaimGamescopeWindow()) {
+                    d->fail("Vulkan window handoff failed");
+                    return 0;
+                }
+            }
+            else {
+                d->composition->cancelFrame();
+                // Consume retirement from the previous handoff before
+                // reactivating this still-live direct swapchain.
+                d->pump();
+                gamescope_swapchain_override_window_content(d->swapchain, d->xServer, d->xWindow);
+                wl_display_flush(d->display);
+                d->composing = false;
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Presentation handoff: %s, decoder retained",
+                compose ? "Vulkan" : "direct");
+        }
+        if (d->composing) return d->composition->waitForDecode(f);
+    }
     if (!f || f->format != AV_PIX_FMT_VAAPI || !f->hw_frames_ctx)
         return 0;
     if (d->decoded && d->decoded->data[3] == f->data[3]
@@ -624,11 +695,13 @@ VrrFallbackReason DirectWaylandRenderer::checkSupport() const
 }
 VrrPrepareResult DirectWaylandRenderer::prepareFrame(AVFrame* f, uint64_t)
 {
+    if (d->composing) return d->composition->prepareFrame(f, 0);
     VrrPrepareResult result;
     if (d->suspended || d->failed || d->pending)
         return result;
     d->pump();
     result.decodeSyncUs = waitForDecode(f);
+    if (d->composing) return d->composition->prepareFrame(f, 0);
     uint64_t start = LiGetMicroseconds();
     if (!d->decoded) {
         d->fail("decoded surface is not ready");
@@ -670,8 +743,21 @@ VrrPrepareResult DirectWaylandRenderer::prepareFrame(AVFrame* f, uint64_t)
     result.sourceFrameReusable = true; // Our buffer owns an independent AVFrame reference.
     return result;
 }
-VrrPresentFeedback DirectWaylandRenderer::presentAdaptive(const VrrPresentRequest&)
+VrrPrepareResult DirectWaylandRenderer::prepareFrame(AVFrame* f, uint64_t boundary, const VrrPresentRequest& request)
 {
+    return d->composing ? d->composition->prepareFrame(f, boundary, request) : prepareFrame(f, boundary);
+}
+VrrPresentFeedback DirectWaylandRenderer::presentAdaptive(const VrrPresentRequest& request)
+{
+    if (d->composing) {
+        auto result = d->composition->presentAdaptive(request);
+        // Each Vulkan swapchain starts a new ID sequence. Keep feedback from
+        // different handoffs distinct in the worker's submission history.
+        const uint64_t tag = d->compositionEpoch << 32;
+        if (result.submissionIdValid) result.submissionId |= tag;
+        if (result.latchSampleValid) result.latchSubmissionId |= tag;
+        return result;
+    }
     VrrPresentFeedback result;
     if (!d->pending || d->suspended || d->failed)
         return cancelFrame();
@@ -718,6 +804,7 @@ VrrPresentFeedback DirectWaylandRenderer::presentAdaptive(const VrrPresentReques
 }
 VrrPresentFeedback DirectWaylandRenderer::cancelFrame()
 {
+    if (d->composing) return d->composition->cancelFrame();
     d->drop(d->pending);
     d->pending = nullptr;
     av_frame_free(&d->decoded);
@@ -727,12 +814,22 @@ VrrPresentFeedback DirectWaylandRenderer::cancelFrame()
 }
 void DirectWaylandRenderer::renderFrame(AVFrame* f)
 {
+    waitForDecode(f);
+    if (d->composing) {
+        d->composition->renderFrame(f);
+        return;
+    }
     if (prepareFrame(f, 0).prepared)
         presentAdaptive({ });
 }
-void DirectWaylandRenderer::setSuspended(bool value) { d->suspended = value; }
+void DirectWaylandRenderer::setSuspended(bool value)
+{
+    d->suspended = value;
+    if (d->composition) d->composition->setSuspended(value);
+}
 bool DirectWaylandRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO p)
 {
+    if (d->composition) d->composition->notifyWindowChanged(p);
     if (p->stateChangeFlags & WINDOW_STATE_CHANGE_SUSPENDED)
         d->suspended = true;
     if (p->stateChangeFlags & WINDOW_STATE_CHANGE_RESTORED)
@@ -741,5 +838,43 @@ bool DirectWaylandRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO p)
 }
 void DirectWaylandRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
 {
-    d->overlays[type].dirty = true;
+    if (d->composition) d->composition->notifyOverlayUpdated(type);
+    else d->overlays[type].dirty = true;
+}
+
+void DirectWaylandRenderer::setOverlayComposition(bool enabled) { d->compositionRequested = enabled; }
+void DirectWaylandRenderer::cleanupRenderContext()
+{
+    if (d->composition) d->composition->cleanupRenderContext();
+}
+
+// Called only on the SDL event thread. Renderer lifetime changes stay on that
+// thread too; the decoding worker is stopped by Session's existing reset path.
+bool DirectWaylandRenderer::overlaysRequireComposition(SDL_Window* window)
+{
+    auto& manager = Session::get()->getOverlayManager();
+    for (int i = 0; i < Overlay::OverlayMax; ++i)
+        if (manager.isOverlayEnabled(static_cast<Overlay::OverlayType>(i)))
+            return true;
+#ifdef SDL_VIDEO_DRIVER_X11
+    SDL_SysWMinfo info {};
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_X11) {
+        Display* display = info.info.x11.display;
+        Atom atom = XInternAtom(display, "GAMESCOPE_COMPOSITION_OVERLAY", True);
+        if (atom) {
+            Atom actual = 0;
+            int bits = 0;
+            unsigned long count = 0, remaining = 0;
+            unsigned char* data = nullptr;
+            const int status = XGetWindowProperty(display, DefaultRootWindow(display), atom,
+                0, 1, False, AnyPropertyType, &actual, &bits, &count, &remaining, &data);
+            const bool visible = status == Success && bits == 32 && count == 1 && data
+                && *reinterpret_cast<unsigned long*>(data) != 0;
+            if (data) XFree(data);
+            if (visible) return true;
+        }
+    }
+#endif
+    return false;
 }

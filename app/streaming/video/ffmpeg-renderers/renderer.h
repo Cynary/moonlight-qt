@@ -205,6 +205,8 @@ public:
         // Nothing
     }
 
+    virtual void setOverlayComposition(bool) {}
+
     virtual bool testRenderFrame(AVFrame*) {
         // If the renderer doesn't provide an explicit test routine,
         // we will always assume that any returned AVFrame can be
