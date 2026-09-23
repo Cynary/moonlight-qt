@@ -5,6 +5,12 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
+Gamescope WSI FIFO is now recognized as protected presentation. Its internal
+driver swapchain uses Mailbox while Gamescope enforces FIFO progress. It must not
+also receive the Immediate-mode software spacing floor: at 120 Hz that floor
+can limit a 116 FPS source to about 115.4 submissions per second. Ordinary FIFO,
+Immediate and relaxed FIFO retain their existing capability rules.
+
 Current source review baseline: `b33a8f9a` plus the 2026-09-27 buffer recovery
 and Linux PyroWave completion, graphics-queue, and coalesced coefficient-store
 changes in this worktree. Deployment and live
