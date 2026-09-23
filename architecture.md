@@ -3727,3 +3727,12 @@ read the same surface as a reference, even when an earlier wait completed.
 
 Export failure uses the existing synchronized path. This patch changes frame
 resource handling; it does not change the timing controller or replay policy.
+
+### Moonmachine Linux clock mapping and early export
+
+Linux sessions enable upstream's `playoutSourceMappingDecoderOutput` parameter.
+Source-clock observations use immutable decoder-output timestamps; GPU readiness
+is observed separately after waiting. This retains our clock/readiness separation
+without adding a second timing parameter. The calibration key remains separate.
+Direct YUV retains and exports the decoded surface before presentation pacing,
+so later decoder reference reads do not delay export at the presentation deadline.

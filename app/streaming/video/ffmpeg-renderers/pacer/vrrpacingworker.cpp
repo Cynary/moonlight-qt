@@ -160,6 +160,15 @@ bool isUncPath(const QString& path)
 }
 #endif
 
+VrrTimingParameters workerTimingParameters(const VrrSessionConfig& config)
+{
+    auto parameters = vrrTimingParametersForSession(config);
+#ifdef __linux__
+    parameters.playoutSourceMappingDecoderOutput = 1;
+#endif
+    return parameters;
+}
+
 } // namespace
 
 VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
@@ -172,8 +181,12 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
                            presenter->canLatchAdaptivePresent()),
     m_TimingController(std::make_unique<VrrTimingController>(
         config, m_CanLatchPresentation,
-        vrrTimingParametersForSession(config)))
+        workerTimingParameters(config)))
 {
+    if (m_TimingController->parameters().playoutSourceMappingDecoderOutput &&
+        !m_Config.calibrationKey.empty()) {
+        m_Config.calibrationKey += "-decoder-output-clock-v1";
+    }
     // Settings enables tracing after SDL initialization. SDL2-compat may cache
     // its environment, so read the current process value just like the path.
     m_DeepTraceEnabled = qEnvironmentVariable("MOONLIGHT_VRR_DEEP_TRACE").startsWith(QLatin1Char('1'));
@@ -454,7 +467,8 @@ int VrrPacingWorker::run()
         if (preparedAhead) {
             frame.noteGpuReadyUs(queuedFrame.preparation->timing.decodeReadyUs);
         }
-        if (decodeSyncWaitUs > kDecodeSyncNoticeUs) {
+        if (!preparedAhead && (decodeSyncWaitUs > kDecodeSyncNoticeUs ||
+                m_TimingController->parameters().playoutSourceMappingDecoderOutput)) {
             // This is an upper bound on completion, sampled after the native
             // wait. Adding the wait duration to decoder output is wrong when
             // the frame already spent time in the pacing queue: it can place
