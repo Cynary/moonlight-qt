@@ -61,10 +61,9 @@ constexpr uint64_t kRateCandidateMinimumUs = 200000;
 // block; the minimum lead keeps enough time for the preparation itself.
 constexpr uint64_t kRenderStartAfterSubmissionUs = 6000;
 constexpr uint64_t kRenderStartMinimumLeadUs = 2500;
-// With the decoder's GPU work synced before preparation, the learned lead
-// collapses to the 0.6 ms render and no longer covers the sporadic 2 to 3 ms
-// renders; the floor keeps that headroom.
-constexpr uint64_t kRenderLeadFloorUs = 3000;
+// Measured preparation already supplies the render tail; do not add a fixed
+// renderer-independent minimum on top of it.
+constexpr uint64_t kRenderLeadFloorUs = 0;
 // Consecutive frames that must map more than a period into the future before
 // the sender clock is considered to have jumped. One early outlier used to
 // re-seed the mapping on itself and make every following frame late.

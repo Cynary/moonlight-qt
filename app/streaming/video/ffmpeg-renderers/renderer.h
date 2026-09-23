@@ -155,6 +155,7 @@ public:
         VDPAU,
         VTSampleLayer,
         VTMetal,
+        DirectWayland,
     };
 
     IFFmpegRenderer(RendererType type) : m_Type(type) {}
@@ -319,6 +320,8 @@ public:
     const char *getRendererName() {
         switch (m_Type) {
         default:
+        case RendererType::DirectWayland:
+            return "Direct Wayland";
         case RendererType::Unknown:
             return "Unknown";
         case RendererType::Vulkan:

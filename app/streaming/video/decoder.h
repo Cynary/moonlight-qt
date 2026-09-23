@@ -94,6 +94,7 @@ typedef struct _DECODER_PARAMETERS {
     // Used by the startup probe so negotiated color policy matches playback.
     bool preferVrrRenderer = false;
     int vrrLatencyMode = 0;
+    int directVideoMode = 0;
     bool gamescopeMailbox = false;
     bool gamescopeRepaint = false;
     bool smoothVrrFrameTiming;

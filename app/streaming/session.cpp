@@ -285,7 +285,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             bool testOnly, IVideoDecoder*& chosenDecoder,
                             bool enableVrr, bool preferVrrRenderer, int vrrDisplayRefreshHz,
                             [[maybe_unused]] bool* effectiveVrr, bool smoothVrrFrameTiming,
-                            bool gamescopeMailbox, int vrrLatencyMode, bool gamescopeRepaint)
+                            bool gamescopeMailbox, int vrrLatencyMode, bool gamescopeRepaint, int directVideoMode)
 {
     DECODER_PARAMETERS params = {};
 
@@ -307,6 +307,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     // it can match that renderer/color policy without starting VRR presentation.
     params.preferVrrRenderer = preferVrrRenderer || enableVrr;
     params.vrrLatencyMode = vrrLatencyMode;
+    params.directVideoMode = directVideoMode;
     params.gamescopeMailbox = gamescopeMailbox;
     params.gamescopeRepaint = gamescopeRepaint;
     params.smoothVrrFrameTiming = smoothVrrFrameTiming;
@@ -569,7 +570,10 @@ bool Session::populateDecoderProperties(SDL_Window* window)
                        m_StreamConfig.fps,
                        false, false, true, decoder,
                        false,
-                       m_PresentationSettings.enableVrr)) {
+                       m_PresentationSettings.enableVrr, 0, nullptr,
+                       m_PresentationSettings.smoothVrrFrameTiming, false,
+                       m_PresentationSettings.vrrLatencyMode, false,
+                       m_PresentationSettings.directVideoMode)) {
         return false;
     }
 
@@ -676,6 +680,7 @@ void Session::snapshotPresentationSettings(SDL_Window* window)
     m_PresentationSettings.enableVrr = false;
     m_PresentationSettings.vrrLatencyMode = m_Preferences->vrrLatencyMode;
     m_PresentationSettings.gamescopeRepaint = false; // Retired repaint experiment.
+    m_PresentationSettings.directVideoMode = m_Preferences->directVideoMode;
     m_PresentationSettings.gamescopeMailbox = false; // Retired Mailbox experiment.
     m_PresentationSettings.smoothVrrFrameTiming = m_Preferences->smoothVrrFrameTiming;
 
@@ -2424,7 +2429,7 @@ void Session::exec()
                                m_PresentationSettings.smoothVrrFrameTiming,
                                m_PresentationSettings.gamescopeMailbox,
                                m_PresentationSettings.vrrLatencyMode,
-                               m_PresentationSettings.gamescopeRepaint)) {
+                               m_PresentationSettings.gamescopeRepaint, m_PresentationSettings.directVideoMode)) {
                 SDL_UnlockMutex(m_DecoderLock);
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "Failed to recreate decoder after reset");

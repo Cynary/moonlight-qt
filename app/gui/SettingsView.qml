@@ -947,6 +947,24 @@ Flickable {
                                   qsTr("Reconnect the stream after changing this setting.")
                 }
 
+                Column {
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    spacing: 6
+                    Label { text: qsTr("Video presentation (Gamescope)") }
+                    ComboBox {
+                        width: parent.width
+                        model: [qsTr("Auto"), qsTr("Direct YUV"), qsTr("Direct RGB"), qsTr("Vulkan")]
+                        currentIndex: StreamingPreferences.directVideoMode
+                        onActivated: StreamingPreferences.directVideoMode = currentIndex
+                    }
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: qsTr("Direct YUV lets the display hardware convert decoded video to RGB. Direct RGB converts it on the GPU first. Requires supported hardware and Gamescope; otherwise uses Vulkan. Reconnect after changing this setting.")
+                    }
+                }
+
                 CheckBox {
                     id: enableHdr
                     width: parent.width

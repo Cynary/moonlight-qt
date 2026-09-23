@@ -238,7 +238,7 @@ void testSourcePlayoutDelayOffsetsProjectedTargets()
                lowLatencyPolicy.playoutPrepareOnArrival == 0 &&
                lowLatencyPolicy.renderStartAfterSubmissionUs == 6000 &&
                lowLatencyPolicy.renderStartMinimumLeadUs == 2500 &&
-               lowLatencyPolicy.renderLeadFloorUs == 3000 &&
+               lowLatencyPolicy.renderLeadFloorUs == 0 &&
                lowLatencyPolicy.playoutSmoothingGainPerMille == 200 &&
                lowLatencyPolicy.playoutSmoothingPeriodAlphaPerMille == 100 &&
                lowLatencyPolicy.playoutSmoothingMaxLagUs == 6000 &&
@@ -1849,6 +1849,32 @@ void testFutureSourceProjectionReseedsPhase()
     expect(!recovered.rebased && recovered.sourceIntervalUs != 0 &&
                recovered.targetUs < nowUs + 2 * 8621,
            "a source projection ahead of decoded local time must reseed phase without discarding cadence");
+}
+
+void testMeasuredPreparationControlsRenderAllowance()
+{
+    const auto session = config(116, 120);
+    VrrTimingController controller(session, true, vrrTimingParametersForSession(session));
+    uint32_t count = 0;
+    auto prepare = [&](uint64_t duration) {
+        const uint64_t now = 1000000 + uint64_t(count) * 8621;
+        auto decision = controller.schedule(frame(count, count * 776, true, now), now);
+        controller.notePreparationDuration(duration);
+        controller.noteSubmission(true, false, decision.targetUs);
+        ++count;
+    };
+    for (int i = 0; i < 32; ++i)
+        prepare(120);
+    expect(controller.renderLeadUs() < 500,
+           "fast preparation must not inherit a fixed render allowance");
+    for (int i = 0; i < 256; ++i)
+        prepare(120);
+    expect(controller.renderLeadUs() < 500,
+           "fast preparation must retain a measured allowance after warmup");
+    for (int i = 0; i < 256; ++i)
+        prepare(4000);
+    expect(controller.renderLeadUs() >= 4000,
+           "preparation allowance must still grow when the renderer becomes slower");
 }
 
 void testDecodeTailAdaptation()
@@ -3828,8 +3854,10 @@ void testPredictionOnlyBufferAdaptation()
     // One active worker honors render-start deadlines and GPU readiness.
     // Delivery, render work and render-wakeup faults each need more padding,
     // even when the backend never supplies any display observation.
+    for (bool nativeProtection : {false, true})
     for (int faultKind : {1, 2, 3}) {
-        VrrTimingController controller(session, true, policy);
+        VrrTimingController controller(session, nativeProtection, policy);
+        uint64_t lastDisplay = 0;
         uint64_t lastSubmission = 0, initial = 0, clean = 0, peak = 0, finalDelay = 0;
         uint64_t maximumLatency = 0, previousDelay = 0;
         bool bounded = true, startupStable = true;
@@ -3852,8 +3880,14 @@ void testPredictionOnlyBufferAdaptation()
             if (i >= 600) peak = std::max(peak, d.playoutDelayUs);
             bounded &= d.playoutDelayUs <= policy.playoutDelayMaximumUs &&
                 (!i || d.playoutDelayUs <= previousDelay + policy.playoutDelayAttackUs) &&
-                (!lastSubmission || submitted >= controller.displayPeriodUs() + lastSubmission);
-            maximumLatency = std::max(maximumLatency, submitted - decoded);
+                (!lastSubmission || submitted >= lastSubmission +
+                    (nativeProtection ? 0 : controller.displayPeriodUs()));
+            // Native FIFO can accept a catch-up submission before the next
+            // refresh boundary, but cannot display it before that boundary.
+            const uint64_t displayed = nativeProtection && lastDisplay ?
+                std::max(submitted, lastDisplay + controller.displayPeriodUs()) : submitted;
+            maximumLatency = std::max(maximumLatency, displayed - decoded);
+            lastDisplay = displayed;
             lastSubmission = submitted;
             previousDelay = finalDelay = d.playoutDelayUs;
         }
@@ -4900,6 +4934,7 @@ int main()
     testCadenceGapAndRateChange();
     testFutureSourceProjectionReseedsPhase();
     testDecodeTailAdaptation();
+    testMeasuredPreparationControlsRenderAllowance();
     testRateChangeReseedsReadinessBudget();
     testFractionalQuantizedCadenceLearning();
     testCutsceneRecoveryAndHitchIsolation();
