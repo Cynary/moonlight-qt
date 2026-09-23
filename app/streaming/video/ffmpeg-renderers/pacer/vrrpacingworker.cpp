@@ -161,6 +161,15 @@ bool isUncPath(const char* path)
 }
 #endif
 
+VrrTimingParameters workerTimingParameters(const VrrSessionConfig& config)
+{
+    auto parameters = vrrTimingParametersForSession(config);
+#ifdef Q_OS_LINUX
+    parameters.playoutOffsetDecoderOutput = 1;
+#endif
+    return parameters;
+}
+
 } // namespace
 
 VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
@@ -173,8 +182,12 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
                            presenter->canLatchAdaptivePresent()),
     m_TimingController(std::make_unique<VrrTimingController>(
         config, m_CanLatchPresentation,
-        vrrTimingParametersForSession(config)))
+        workerTimingParameters(config)))
 {
+    if (m_TimingController->parameters().playoutOffsetDecoderOutput &&
+        !m_Config.calibrationKey.empty()) {
+        m_Config.calibrationKey += "-decoder-output-clock-v1";
+    }
     const char* deepTraceEnv = SDL_getenv("MOONLIGHT_VRR_DEEP_TRACE");
     m_DeepTraceEnabled = deepTraceEnv != nullptr && deepTraceEnv[0] == '1';
 
@@ -423,7 +436,13 @@ int VrrPacingWorker::run()
         // the preparation never blocks on the decoder.
         const uint64_t decodeSyncWaitUs = m_Presenter->waitForDecode(
             frame.frame(), frame.decodeBoundary());
-        if (decodeSyncWaitUs > kDecodeSyncNoticeUs) {
+        if (m_TimingController->parameters().playoutOffsetDecoderOutput) {
+            // This is when readiness was observed, not a claim about the
+            // precise instant the GPU finished. Never backdate it by assuming
+            // a zero blocking wait means decoding finished at CPU output.
+            frame.noteGpuReadyUs(LiGetMicroseconds());
+        }
+        else if (decodeSyncWaitUs > kDecodeSyncNoticeUs) {
             // The wait can overlap time already spent in the pacing queue.
             // Keep that queue residence out of the readiness model by adding
             // only the blocking fence cost to immutable decoder output.
@@ -454,19 +473,20 @@ int VrrPacingWorker::run()
         // render-bound client it only deepened the standing backlog.
         const uint64_t scheduleNowUs = LiGetMicroseconds();
         telemetry.staleCheckUs = scheduleNowUs;
-        const uint64_t scheduleAgeUs = scheduleNowUs >=
-                frame.decodeCompleteUs() ?
-            scheduleNowUs - frame.decodeCompleteUs() : 0;
+        const bool observedReadiness =
+            m_TimingController->parameters().playoutOffsetDecoderOutput != 0;
+        const uint64_t contentOriginUs = observedReadiness ?
+            frame.decoderOutputUs() : frame.decodeCompleteUs();
+        const uint64_t scheduleAgeUs = positiveDifference(scheduleNowUs, contentOriginUs);
         telemetry.staleAgeUs = scheduleAgeUs;
         const bool metronome =
             m_TimingController->parameters().playoutMetronomeEnabled != 0;
         const bool latencyFix = m_TimingController->latencyFixActive();
-        // The optional near-ceiling policy measures transport occupancy from
-        // admission. Other modes retain their existing GPU-readiness origin
-        // for stale-work policy; reporting always uses immutable decoder
-        // output below.
+        // Observing GPU readiness now must not rejuvenate content that was
+        // already queued. New-policy sessions measure content age from CPU
+        // output; historical policy retains its old readiness origin.
         const uint64_t ageOriginUs = latencyFix ?
-            queuedFrame.trace.arrivalUs : frame.decodeCompleteUs();
+            queuedFrame.trace.arrivalUs : contentOriginUs;
         const uint64_t ageUs = positiveDifference(scheduleNowUs, ageOriginUs);
         if (hasQueuedFrame() && VrrFrameDropPolicy::beforeRender(
                 decision, m_TimingController->displayPeriodUs(), ageUs, metronome, latencyFix)) {
@@ -1220,7 +1240,7 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     // this row's policy from immutable session settings and its captured mode.
     auto traceConfig = m_Config;
     traceConfig.latencyMode = row.latencyMode;
-    const VrrTimingParameters parameters = vrrTimingParametersForSession(traceConfig);
+    const VrrTimingParameters parameters = workerTimingParameters(traceConfig);
     const VrrPresentFeedback& feedback = row.feedback;
     const FrameTelemetry& telemetry = row.telemetry;
     const uint64_t nativePresentDurationUs =

@@ -72,6 +72,7 @@
     X(uint64_t, playout_offset_cadence_gate, playoutOffsetCadenceGate, 0) \
     X(uint64_t, playout_offset_slew_us_per_second, playoutOffsetSlewUsPerSecond, 0) \
     X(uint64_t, playout_offset_source_clock, playoutOffsetSourceClock, 0) \
+    X(uint64_t, playout_offset_decoder_output, playoutOffsetDecoderOutput, 0) \
     X(uint64_t, playout_offset_maximum_step_us, playoutOffsetMaximumStepUs, 100) \
     X(size_t, playout_offset_warmup_samples, playoutOffsetWarmupSamples, 64) \
     X(uint64_t, playout_delay_adaptive, playoutDelayAdaptive, 0) \

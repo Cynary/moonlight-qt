@@ -529,6 +529,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     m_TimestampPlayoutActive = timestampPlayout;
     const uint64_t rtpUs = timestampPlayout ?
         rtpTicksToUs(m_UnwrappedRtpTicks) : 0;
+    // Clock mapping must not depend on how long the presentation worker
+    // happened to block on the GPU. Readiness remains a separate observation.
+    const uint64_t clockObservationUs = m_Parameters.playoutOffsetDecoderOutput ?
+        frame.decoderOutputUs() : frame.decodeCompleteUs();
     int64_t readyOffsetUs = 0;
     int64_t smoothingUs = 0;
     uint64_t missedTicks = 0;
@@ -536,13 +540,13 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
     const uint64_t leadUs = saturatingAdd(m_Parameters.playoutPredictionEnabled ? typicalRenderUs() : m_RenderLeadUs,
                                           m_Parameters.presentationSafetyUs);
     if (timestampPlayout) {
-        const int64_t offsetUs = signedDifference(frame.decodeCompleteUs(),
+        const int64_t offsetUs = signedDifference(clockObservationUs,
                                                   rtpUs);
         const bool timeBasedOffset =
             m_Parameters.playoutOffsetSlewUsPerSecond != 0;
         const uint64_t offsetClockUs = timeBasedOffset ?
             (m_Parameters.playoutOffsetSourceClock != 0 ? rtpUs : nowUs) :
-            frame.decodeCompleteUs();
+            clockObservationUs;
         const int64_t appliedOffsetUs = observePlayoutOffset(
             offsetClockUs,
             offsetUs, rebased || cadence.eligible, cadence.phaseDiscontinuity);
@@ -716,10 +720,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
                 m_Parameters.playoutOffsetSlewUsPerSecond != 0;
             const uint64_t offsetClockUs = timeBasedOffset ?
                 (m_Parameters.playoutOffsetSourceClock != 0 ? rtpUs : nowUs) :
-                frame.decodeCompleteUs();
+                clockObservationUs;
             observePlayoutOffset(
                 offsetClockUs,
-                signedDifference(frame.decodeCompleteUs(), rtpUs));
+                signedDifference(clockObservationUs, rtpUs));
         }
         readyOffsetUs = 0;
         cadence.phaseDiscontinuity = true;

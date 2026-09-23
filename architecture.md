@@ -2176,3 +2176,22 @@ read the same surface as a reference, even when an earlier wait completed.
 
 Export failure uses the existing synchronized path. This patch changes frame
 resource handling; it does not change the timing controller or replay policy.
+
+### Linux clock/readiness separation (2026-09-22)
+
+Linux live sessions enable the recorded timing parameter
+playoutOffsetDecoderOutput by default. The timestamp-playout source-clock observation uses
+the immutable FFmpeg decoderOutputUs, while decodeCompleteUs records the actual
+post-synchronization observation time, including a zero-wait observation. The
+latter is an upper bound on GPU readiness, not a hardware completion timestamp.
+GPU waits and worker scheduling cannot backdate the clock observation. Adaptive
+pacing and target clamping retain their existing policy; targets never precede
+observed readiness. Stale-frame age uses immutable decoder output, so observing
+readiness does not reset the age of queued content. This policy uses a separate
+calibration key.
+
+This includes early retained YUV export. The raw parameter defaults to zero
+for replay compatibility; the Linux worker enables it for live sessions.
+Other platforms retain their previous policy. Core regression coverage compares identical CPU/source timestamps with
+4.5 ms versus intermittently 11 ms readiness observations and requires unchanged
+clock mapping with targets at or after readiness.
