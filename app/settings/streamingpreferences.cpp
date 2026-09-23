@@ -161,6 +161,7 @@ void StreamingPreferences::reload()
         // Preserve the old checkbox choice while new users start on Balanced Target.
         vrrLatencyMode = settings.value(SER_VRRLATENCYFIX).toBool() ? VLM_BALANCED_TARGET : VLM_SMOOTH;
     }
+    directVideoMode = qBound(0, settings.value("directvideomode", 0).toInt(), 3);
     smoothVrrFrameTiming = settings.value(SER_SMOOTHVRRFRAMETIMING, true).toBool();
     traceVrrFrames = settings.value(SER_TRACEVRRFRAMES, false).toBool();
     settings.remove("vrrdiagnosticmode"); // Retired, unpublished timing comparison selector.
@@ -370,6 +371,7 @@ void StreamingPreferences::save()
     settings.remove("gamescopemailbox"); // Retired Mailbox A/B experiment.
     settings.remove("gamescoperepaint");
     settings.remove("gamescopeforcecomposition");
+    settings.setValue("directvideomode", directVideoMode);
     settings.setValue(SER_SMOOTHVRRFRAMETIMING, smoothVrrFrameTiming);
     settings.setValue(SER_TRACEVRRFRAMES, traceVrrFrames);
     settings.remove("v2queue"); // The interval queue is now the production policy.

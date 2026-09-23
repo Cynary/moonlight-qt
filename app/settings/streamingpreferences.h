@@ -150,6 +150,7 @@ public:
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool enableVrr MEMBER enableVrr NOTIFY enableVrrChanged)
     Q_PROPERTY(int vrrLatencyMode MEMBER vrrLatencyMode NOTIFY vrrLatencyModeChanged)
+    Q_PROPERTY(int directVideoMode MEMBER directVideoMode NOTIFY directVideoModeChanged)
     Q_PROPERTY(bool smoothVrrFrameTiming MEMBER smoothVrrFrameTiming NOTIFY smoothVrrFrameTimingChanged)
     Q_PROPERTY(bool traceVrrFrames MEMBER traceVrrFrames NOTIFY traceVrrFramesChanged)
     Q_PROPERTY(bool exportingDiagnostics MEMBER m_ExportingDiagnostics NOTIFY diagnosticsChanged)
@@ -208,6 +209,7 @@ public:
     // Re-present the last frame inside a host gap longer than the panel's
     // adaptive-refresh floor, so the panel never engages its own
     // low-framerate compensation.
+    int directVideoMode = 0; // 0: Auto, 1: direct YUV, 2: direct RGB, 3: Vulkan
     bool smoothVrrFrameTiming;
     bool traceVrrFrames;
     bool gameOptimizations;
@@ -251,6 +253,7 @@ signals:
     void enableVsyncChanged();
     void enableVrrChanged();
     void vrrLatencyModeChanged();
+    void directVideoModeChanged();
     void smoothVrrFrameTimingChanged();
     void traceVrrFramesChanged();
     void diagnosticsChanged();
