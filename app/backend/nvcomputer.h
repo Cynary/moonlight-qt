@@ -100,6 +100,7 @@ public:
     int serverCodecModeSupport;
     // Optional paired-host /serverinfo extension; zero means unknown.
     uint32_t pyrowaveHostLinkMbps = 0;
+    unsigned int nativeControllerVersion=0;
     QString gpuModel;
     bool isSupportedServerVersion;
     // Optional /serverinfo extension; absent fields never imply integration.

@@ -198,6 +198,7 @@ SOURCES += \
     streaming/input/gamepad.cpp \
     streaming/input/dualsensehaptics.cpp \
     streaming/input/dualsensehid.cpp \
+    streaming/input/nativesteam.cpp \
     streaming/input/input.cpp \
     streaming/input/keyboard.cpp \
     streaming/input/mouse.cpp \

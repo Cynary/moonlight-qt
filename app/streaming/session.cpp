@@ -72,11 +72,14 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
 #if defined(Q_OS_LINUX) && SDL_VERSION_ATLEAST(2, 24, 0)
-    DualSenseHaptics::receive
+    DualSenseHaptics::receive,
 #else
-    nullptr
+    nullptr,
 #endif
+    Session::clNativeController
 };
+
+void Session::clNativeController(const uint8_t* data,unsigned size) {s_ActiveSession->m_NativeSteam.receive(data,size);}
 
 Session* Session::s_ActiveSession;
 QSemaphore Session::s_ActiveSessionSemaphore(1);
@@ -1498,6 +1501,7 @@ private:
         SDL_assert(m_Session->m_VideoDecoder == nullptr);
 
         // Finish cleanup of the connection state
+        m_Session->m_NativeSteam.stop();
         LiStopConnection();
 
         // Perform a best-effort app quit
@@ -1846,7 +1850,9 @@ bool Session::startConnectionAsync()
     QByteArray hostnameStr = m_Computer->activeAddress.address().toUtf8();
     QByteArray siAppVersion = m_Computer->appVersion.toUtf8();
 
-    SERVER_INFORMATION hostInfo;
+    SERVER_INFORMATION hostInfo{};
+    const QString& nativeDevice=m_NativeSteamDevice;
+    hostInfo.nativeControllerVersion=nativeDevice.isEmpty()?0:m_Computer->nativeControllerVersion;
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -1951,6 +1957,7 @@ bool Session::startConnectionAsync()
         return false;
     }
 
+    if(hostInfo.nativeControllerVersion==1)m_NativeSteam.start(nativeDevice);
     emit connectionStarted();
     return true;
 }
@@ -2021,7 +2028,10 @@ void Session::start()
 
     // Initialize the gamepad code with our preferences
     // NB: m_InputHandler must be initialize before starting the connection.
-    m_InputHandler = new SdlInputHandler(*m_Preferences, m_StreamConfig.width, m_StreamConfig.height);
+    m_NativeSteamDevice = NativeSteam::findDevice(m_Preferences->nativeSteamController);
+    m_InputHandler = new SdlInputHandler(*m_Preferences, m_StreamConfig.width, m_StreamConfig.height,
+        m_Computer->nativeControllerVersion == 1 &&
+        !m_NativeSteamDevice.isEmpty());
 
     // Kick off the async connection thread then return to the caller to pump the event loop
     auto thread = new AsyncConnectionStartThread(this);

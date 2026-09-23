@@ -36,6 +36,7 @@
 #define SER_TRACEVRRFRAMES "tracevrrframes"
 #define SER_GAMEOPTS "gameopts"
 #define SER_HOSTAUDIO "hostaudio"
+#define SER_NATIVE_STEAM "nativeSteamController"
 #define SER_MULTICONT "multicontroller"
 #define SER_AUDIOCFG "audiocfg"
 #define SER_VIDEOCFG "videocfg"
@@ -167,6 +168,7 @@ void StreamingPreferences::reload()
     settings.remove("vrrdiagnosticmode"); // Retired, unpublished timing comparison selector.
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
+    nativeSteamController = settings.value(SER_NATIVE_STEAM, false).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
     enableMdns = settings.value(SER_MDNS, true).toBool();
     quitAppAfter = settings.value(SER_QUITAPPAFTER, false).toBool();
@@ -377,6 +379,7 @@ void StreamingPreferences::save()
     settings.remove("v2queue"); // The interval queue is now the production policy.
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
+    settings.setValue(SER_NATIVE_STEAM, nativeSteamController);
     settings.setValue(SER_MULTICONT, multiController);
     settings.setValue(SER_MDNS, enableMdns);
     settings.setValue(SER_QUITAPPAFTER, quitAppAfter);
