@@ -44,9 +44,15 @@ reports and preventing the observed Steam Input orientation resets.
 The client and Windows host compile. Protocol bounds/direction tests pass under
 ASan/UBSan. The four IMU timestamp tests pass. An initial end-to-end synthetic run
 received 4,920 reports in the Windows HID viewer with zero malformed reports.
-Normal stream disconnect removed the virtual HID device. Synthetic reports do
-not validate physical controls, vibration, local Steam input isolation, or
-reconnection after sleep; those checks remain required before release.
+Normal stream disconnect removed the virtual HID device. Physical testing then received 1,344 real reports in five seconds with zero
+malformed reports. Windows Steam Input recognized type 17 (Steam Controller 2026)
+and returned changing orientation. Both left/right haptic requests reached the
+physical device and were felt by the tester. Normal disconnect removed the HID;
+reconnect received 4,721 real reports with zero malformed reports without pairing
+or unplugging. Local Steam input isolation and sleep recovery remain unverified.
+The initial rumble test did not specify identical pulse effects for the two
+sides. A second test sent three identical finite pulse bursts to each side; the
+tester confirmed matching timing and count.
 
 `tests/native-controller/simulated-helper.py` exercises input delivery without
 hardware. Never select this helper for normal play. It intentionally refuses
