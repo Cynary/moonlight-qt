@@ -1,4 +1,6 @@
 #include "directwayland.h"
+#include "protocols/linux-drm-syncobj-v1-client-protocol.h"
+#include <xf86drm.h>
 #include "plvk.h"
 #include "protocols/gamescope-swapchain-client-protocol.h"
 #include "protocols/linux-dmabuf-unstable-v1-client-protocol.h"
@@ -11,6 +13,7 @@
 #include <deque>
 #include <fcntl.h>
 #include <poll.h>
+#include <map>
 #include <set>
 #include <sys/mman.h>
 #include <time.h>
@@ -49,6 +52,9 @@ struct DirectWaylandRenderer::State {
     gamescope_swapchain_factory_v2* factory = nullptr;
     gamescope_swapchain* swapchain = nullptr;
     wl_compositor* compositor = nullptr;
+    wp_linux_drm_syncobj_manager_v1* syncManager = nullptr;
+    wp_linux_drm_syncobj_surface_v1* syncSurface = nullptr;
+    int syncDevice = -1;
     zwlr_layer_shell_v1* layerShell = nullptr;
     wl_surface* overlaySurface = nullptr;
     zwlr_layer_surface_v1* overlayLayer = nullptr;
@@ -57,6 +63,77 @@ struct DirectWaylandRenderer::State {
     AVFrame* decoded = nullptr;
     VADRMPRIMESurfaceDescriptor decodedExport {};
     bool hasDecodedExport = false;
+    // Exported storage belongs to a VA surface pool, not one frame.
+    // Retain the pool (not AVFrames, which would prevent decoder reuse).
+    AVBufferRef* exportPool = nullptr;
+    std::map<VASurfaceID, VADRMPRIMESurfaceDescriptor> exportCache;
+    void clearExportCache()
+    {
+        for (auto& entry : exportCache)
+            for (uint32_t i = 0; i < entry.second.num_objects; ++i)
+                close(entry.second.objects[i].fd);
+        exportCache.clear();
+        av_buffer_unref(&exportPool);
+    }
+    static bool duplicateExport(const VADRMPRIMESurfaceDescriptor& src,
+                                VADRMPRIMESurfaceDescriptor& dst)
+    {
+        if (!src.num_objects || src.num_objects > 4) return false;
+        dst = src;
+        for (uint32_t i = 0; i < src.num_objects; ++i) {
+            dst.objects[i].fd = fcntl(src.objects[i].fd, F_DUPFD_CLOEXEC, 0);
+            if (dst.objects[i].fd < 0) {
+                for (uint32_t j = 0; j < i; ++j) close(dst.objects[j].fd);
+                dst = {};
+                return false;
+            }
+        }
+        return true;
+    }
+    bool exportDecoded(AVFrame* frame, VADRMPRIMESurfaceDescriptor& desc)
+    {
+        auto* frames = reinterpret_cast<AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        auto* ctx = reinterpret_cast<AVVAAPIDeviceContext*>(frames->device_ctx->hwctx);
+        auto* pool = static_cast<AVVAAPIFramesContext*>(frames->hwctx);
+        const auto surface = VASurfaceID(uintptr_t(frame->data[3]));
+        if (exportPool && exportPool->data != frame->hw_frames_ctx->data)
+            clearExportCache();
+        const char* opt = SDL_getenv("MOONLIGHT_VA_EXPORT_CACHE");
+        const bool fixed = frames->initial_pool_size > 0 && pool && pool->surface_ids &&
+            pool->nb_surfaces > 0 && pool->nb_surfaces <= 128 &&
+            std::find(pool->surface_ids, pool->surface_ids + pool->nb_surfaces, surface)
+                != pool->surface_ids + pool->nb_surfaces;
+        // Modern FFmpeg VA decoding uses a growable AVBufferPool. Its surfaces
+        // return to the pool on frame release; they are not destroyed until
+        // frames-context teardown. The built-in VA allocator's opaque pointer
+        // identifies the owning frames context. Do not cache unknown allocators.
+        const bool dynamic = frames->initial_pool_size == 0 && frames->pool &&
+            frame->buf[0] && frame->buf[0]->data == frame->data[3] &&
+            av_buffer_pool_buffer_get_opaque(frame->buf[0]) == frames;
+        const bool cacheable = opt && strcmp(opt, "1") == 0 && (fixed || dynamic);
+        if (cacheable) {
+            auto found = exportCache.find(surface);
+            if (found != exportCache.end() && duplicateExport(found->second, desc))
+                return true;
+        }
+        if (vaExportSurfaceHandle(ctx->display, surface,
+                VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                &desc) != VA_STATUS_SUCCESS)
+            return false;
+        if (cacheable && exportCache.size() < 128 &&
+            exportCache.find(surface) == exportCache.end()) {
+            if (!exportPool) exportPool = av_buffer_ref(frame->hw_frames_ctx);
+            VADRMPRIMESurfaceDescriptor retained {};
+            if (exportPool && duplicateExport(desc, retained)) {
+                exportCache.emplace(surface, retained);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Direct VA export cache: retained surface %u (%zu entries)",
+                    surface, exportCache.size());
+            }
+        }
+        return true;
+    }
     void clearDecoded()
     {
         if (hasDecodedExport) {
@@ -88,6 +165,9 @@ struct DirectWaylandRenderer::State {
         wl_buffer* proxy = nullptr;
         AVFrame* frame = nullptr;
         VASurfaceID rgb = VA_INVALID_ID;
+        uint32_t syncHandle = 0;
+        wp_linux_drm_syncobj_timeline_v1* timeline = nullptr;
+        bool submitted = false;
     };
     struct Import {
         wl_buffer* buffer = nullptr;
@@ -131,6 +211,30 @@ struct DirectWaylandRenderer::State {
             SDL_PushEvent(&event);
         }
     }
+    bool prepareSync(Buffer* b)
+    {
+        if (!syncSurface) return true;
+        if (drmSyncobjCreate(syncDevice, 0, &b->syncHandle) != 0) return false;
+        int fd = -1;
+        if (drmSyncobjHandleToFD(syncDevice, b->syncHandle, &fd) != 0) return false;
+        b->timeline = wp_linux_drm_syncobj_manager_v1_import_timeline(syncManager, fd);
+        close(fd);
+        // waitForDecode completed before preparation; RGB conversion also
+        // synchronizes its destination. Retaining b->frame prevents reuse.
+        uint64_t point = 1;
+        return b->timeline && drmSyncobjTimelineSignal(syncDevice, &b->syncHandle, &point, 1) == 0;
+    }
+    void reapReleased()
+    {
+        for (auto it = buffers.begin(); it != buffers.end();) {
+            Buffer* b = *it++;
+            if (!b->submitted || !b->syncHandle) continue;
+            uint64_t point = 2;
+            if (drmSyncobjTimelineWait(syncDevice, &b->syncHandle, &point, 1, 0,
+                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, nullptr) == 0)
+                drop(b);
+        }
+    }
     void pump(int timeoutMs = 0)
     {
         if (!display || !queue)
@@ -145,11 +249,14 @@ struct DirectWaylandRenderer::State {
         }
         if (wl_display_dispatch_queue_pending(display, queue) < 0)
             fail("Wayland connection failed");
+        reapReleased();
     }
     void drop(Buffer* b)
     {
         if (!b)
             return;
+        if (b->timeline) wp_linux_drm_syncobj_timeline_v1_destroy(b->timeline);
+        if (b->syncHandle) drmSyncobjDestroy(syncDevice, b->syncHandle);
         if (b->proxy)
             wl_buffer_destroy(b->proxy);
         if (b->rgb != VA_INVALID_ID)
@@ -161,7 +268,8 @@ struct DirectWaylandRenderer::State {
     static void released(void* data, wl_buffer*)
     {
         auto* b = static_cast<Buffer*>(data);
-        b->owner->drop(b);
+        // Explicit release, not wl_buffer.release, owns reuse permission.
+        if (!b->syncHandle) b->owner->drop(b);
     }
     static void shmReleased(void* data, wl_buffer*)
     {
@@ -190,6 +298,9 @@ struct DirectWaylandRenderer::State {
         } else if (!strcmp(interface, "gamescope_swapchain_factory_v2"))
             s->factory = static_cast<gamescope_swapchain_factory_v2*>(
                 wl_registry_bind(r, name, &gamescope_swapchain_factory_v2_interface, 1));
+        else if (!strcmp(interface, "wp_linux_drm_syncobj_manager_v1"))
+            s->syncManager = static_cast<wp_linux_drm_syncobj_manager_v1*>(
+                wl_registry_bind(r, name, &wp_linux_drm_syncobj_manager_v1_interface, 1));
         else if (!strcmp(interface, "wl_compositor"))
             s->compositor = static_cast<wl_compositor*>(
                 wl_registry_bind(r, name, &wl_compositor_interface, std::min(version, 4u)));
@@ -477,6 +588,7 @@ struct DirectWaylandRenderer::State {
     ~State()
     {
         clearDecoded();
+        clearExportCache();
         if (surface && ready) {
             wl_surface_attach(surface, nullptr, 0, 0);
             wl_surface_commit(surface);
@@ -501,6 +613,9 @@ struct DirectWaylandRenderer::State {
         if (vppConfig != VA_INVALID_ID)
             vaDestroyConfig(va, vppConfig);
         av_buffer_unref(&device);
+        if (syncSurface) wp_linux_drm_syncobj_surface_v1_destroy(syncSurface);
+        if (syncManager) wp_linux_drm_syncobj_manager_v1_destroy(syncManager);
+        if (syncDevice >= 0) close(syncDevice);
         if (factory)
             gamescope_swapchain_factory_v2_destroy(factory);
         if (dma)
@@ -615,6 +730,19 @@ bool DirectWaylandRenderer::initialize(PDECODER_PARAMETERS p)
         return false;
     if (d->ownsDisplay)
         d->surface = wl_compositor_create_surface(d->compositor);
+    const char* syncDevice = SDL_getenv("MOONLIGHT_DIRECT_SYNCOBJ_DEVICE");
+    if (!p->testOnly && syncDevice && *syncDevice) {
+        // Experimental opt-in uses an explicit render node on the same GPU.
+        // Refuse initialization rather than silently test the implicit path.
+        if (!d->syncManager) return false;
+        d->syncDevice = open(syncDevice, O_RDWR | O_CLOEXEC);
+        if (d->syncDevice < 0) return false;
+        uint64_t supported = 0;
+        if (drmGetCap(d->syncDevice, DRM_CAP_SYNCOBJ_TIMELINE, &supported) || !supported)
+            return false;
+        d->syncSurface = wp_linux_drm_syncobj_manager_v1_get_surface(d->syncManager, d->surface);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Direct explicit synchronization enabled on %s", syncDevice);
+    }
     if (!p->testOnly) {
         d->swapchain = gamescope_swapchain_factory_v2_create_swapchain(d->factory, d->surface);
         static const gamescope_swapchain_listener sl { State::past, State::cycle, State::retired };
@@ -714,10 +842,7 @@ uint64_t DirectWaylandRenderer::waitForDecode(AVFrame* f)
             // now, before pacing gives the decoder time to submit a later
             // frame that uses this one as a reference. Do not export it again
             // at the presentation deadline.
-            d->hasDecodedExport = vaExportSurfaceHandle(ctx->display,
-                VASurfaceID(uintptr_t(f->data[3])), VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
-                &d->decodedExport) == VA_STATUS_SUCCESS;
+            d->hasDecodedExport = d->exportDecoded(f, d->decodedExport);
             if (!d->hasDecodedExport) {
                 d->clearDecoded();
                 d->fail("early decoded surface export failed");
@@ -801,6 +926,15 @@ VrrPresentFeedback DirectWaylandRenderer::presentAdaptive(const VrrPresentReques
     if (!d->pending || d->suspended || d->failed)
         return cancelFrame();
     d->pump();
+    if (!d->prepareSync(d->pending)) {
+        d->fail("explicit frame synchronization failed");
+        return cancelFrame();
+    }
+    if (d->syncSurface) {
+        wp_linux_drm_syncobj_surface_v1_set_acquire_point(d->syncSurface, d->pending->timeline, 0, 1);
+        wp_linux_drm_syncobj_surface_v1_set_release_point(d->syncSurface, d->pending->timeline, 0, 2);
+        d->pending->submitted = true;
+    }
     uint64_t id = ++d->id;
     gamescope_swapchain_set_present_time(d->swapchain, uint32_t(id), 0, 0);
     if (d->submissions.size() == 32)

@@ -9,6 +9,7 @@
 #include "vrr/vrrtypes.h"
 #include "vrr/vrrtimingcontroller.h"
 #include "vrr/tracequeue.h"
+#include "vrr/predictivedrop.h"
 
 #include <atomic>
 #include <cstdio>
@@ -57,6 +58,7 @@ private:
         Interrupted,
         Stale,
         PreparationFailed,
+        PredictiveDrop,
     };
 
     struct FrameTraceContext {
@@ -214,6 +216,8 @@ private:
     PacerTelemetry* m_Telemetry;
     VrrSessionConfig m_Config;
     bool m_CanLatchPresentation = false;
+    bool m_PredictiveDropEnabled = false;
+    VrrPredictiveDrop m_PredictiveDrop;
     bool m_WorkerStarted = false;
     std::atomic_bool m_CalibrationInvalidated { false };
     QByteArray m_InitialPlayoutProfile;
