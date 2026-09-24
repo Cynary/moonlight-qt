@@ -19,7 +19,7 @@ interface-2 hidraw node automatically. The helper must still be installed.
 For development, set `MOONMACHINE_NATIVE_CONTROLLER_DEVICE` to the puck's
 interface-2 hidraw node and `MOONMACHINE_NATIVE_CONTROLLER_HELPER` to the supplied
 `app/deploy/linux/native-controller/moonmachine-native-controller` script. Keep
-`imu_clock.py` beside it. The user must have access to the hidraw node. The node
+`imu_clock.py` and `controller_io.py` beside it. The user must have access to the hidraw node. The node
 number is not stable across boots; check sysfs identity before using it. These
 variables override discovery for development and transport simulation.
 
@@ -62,3 +62,26 @@ The tester also confirmed local Steam menu navigation immediately after ending
 the stream, without pairing or reconnecting. Concurrent local input isolation
 while streaming, sleep recovery, and the complete guided control checklist
 have not been fully validated.
+
+## Command scheduling
+
+Input reading and physical USB commands run independently. Slow USB feature I/O
+must not delay button-release or trackpad reports. Commands execute in arrival
+order on one worker; no input report is replayed to fill a timing gap.
+
+The physical-command queue holds at most 32 requests. Nonzero rumble/pulse
+commands waiting there for over 50 ms are rejected rather than played late.
+Stop commands and feature transactions are not treated as expiring haptic effects.
+This is a local queue-age limit, not a measurement of network transit time.
+Sensor timestamps remain in the input reports; independent computer clocks are
+not subtracted or used to reorder button edges.
+
+Steam Input can expose the puck as a second, generic Steam Virtual Gamepad.
+Both startup enumeration and hotplug exclude that duplicate using Steam's
+per-slot physical VID/PID metadata. Other slots, including Xbox controllers,
+remain on the normal gamepad path. The actual MoonDeck/Overcooked launch was
+verified with a native HID device and no duplicate Xbox 360 device on Windows.
+
+Run `python3 -m unittest discover -s app/deploy/linux/native-controller
+-p test_controller_io.py` for command-order, backpressure, expiry, stop-command,
+and failure-recovery tests (join the command onto one line).
