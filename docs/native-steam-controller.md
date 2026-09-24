@@ -57,3 +57,8 @@ tester confirmed matching timing and count.
 `tests/native-controller/simulated-helper.py` exercises input delivery without
 hardware. Never select this helper for normal play. It intentionally refuses
 feature commands; use the real device helper for capabilities and haptics tests.
+
+The tester also confirmed local Steam menu navigation immediately after ending
+the stream, without pairing or reconnecting. Concurrent local input isolation
+while streaming, sleep recovery, and the complete guided control checklist
+have not been fully validated.
