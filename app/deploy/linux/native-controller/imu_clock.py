@@ -1,14 +1,24 @@
 # SPDX-License-Identifier: MIT
-"""Work around Steam Input's neutral orientation on repeated Triton IMU times.
+"""Give forwarded input a continuous client-side microsecond clock.
 
-Keep every input report. Separate reports sharing a sensor timestamp by one
-microsecond; the next real sensor timestamp remains unchanged. Never replace
-a genuine clock reset with a large invented time interval.
+The firmware's sensor clock can freeze while reports and trackpad motion keep
+arriving. Steam Input also uses this field for trackball timing. Incrementing a
+frozen clock by one microsecond per report makes normal movement appear thousands
+of times faster, and resetting that adjustment causes backwards time jumps.
+
+Use elapsed monotonic receive time, anchored to the first sensor timestamp. Keep
+all reports and fields other than this timestamp. Wrap naturally at 32 bits;
+firmware sensor-clock stops/restarts do not restart the forwarded input clock.
 """
+import time
+
+
 class ImuClock:
-    def __init__(self):
-        self.raw = None
-        self.sent = None
+    def __init__(self, clock_ns=time.monotonic_ns):
+        self.clock_ns = clock_ns
+        self.epoch_ns = None
+        self.epoch_stamp = None
+        self.last_elapsed = None
         self.adjustments = 0
 
     def normalize(self, report):
@@ -16,15 +26,14 @@ class ImuClock:
         if not report or report[0] not in expected or len(report) != expected[report[0]]:
             return report
         raw = int.from_bytes(report[30:34], 'little')
-        sent = raw
-        if self.raw is not None:
-            advance = (raw - self.raw) & 0xffffffff
-            ahead = (self.sent - raw) & 0xffffffff
-            # Allow a duplicate or a small forward step overtaken by our prior
-            # adjustment. A real backwards jump starts a new clock epoch.
-            if advance < 0x80000000 and ahead < 1000:
-                sent = (self.sent + 1) & 0xffffffff
-        self.raw, self.sent = raw, sent
+        now = self.clock_ns()
+        if self.epoch_ns is None:
+            self.epoch_ns, self.epoch_stamp = now, raw
+            elapsed = 0
+        else:
+            elapsed = max((now - self.epoch_ns) // 1000, self.last_elapsed + 1)
+        self.last_elapsed = elapsed
+        sent = (self.epoch_stamp + elapsed) & 0xffffffff
         if sent == raw:
             return report
         result = bytearray(report)
