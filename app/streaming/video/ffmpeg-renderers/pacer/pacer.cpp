@@ -1,3 +1,4 @@
+#include <QSettings>
 #include "pacer.h"
 #include "path.h"
 #include <QCryptographicHash>
@@ -306,6 +307,7 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps,
     // rejection continues through the original fixed path below.
     if (enableVrr) {
         VrrSessionConfig config;
+        config.experimentalPredictiveDrop = QSettings().value("experimentalpredictivedrop", false).toBool();
         // The production queue policy is shared across native backends.
         config.readinessHitchFeedback = false;
         config.latencyMode = vrrLatencyMode >= 0 && vrrLatencyMode <= 2 ? vrrLatencyMode : 1;

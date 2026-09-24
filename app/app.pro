@@ -648,6 +648,7 @@ SOURCES += $$PWD/streaming/video/ffmpeg-renderers/pacer/vrr/profile.cpp
 linux:wayland:contains(DEFINES, HAVE_LIBVA):contains(DEFINES, HAVE_DRM) {
     DEFINES += HAVE_DIRECT_WAYLAND
     SOURCES += streaming/video/ffmpeg-renderers/directwayland.cpp \
+               streaming/video/ffmpeg-renderers/protocols/linux-drm-syncobj-v1-protocol.c \
                streaming/video/ffmpeg-renderers/protocols/linux-dmabuf-unstable-v1-protocol.c \
                streaming/video/ffmpeg-renderers/protocols/gamescope-swapchain-protocol.c \
                streaming/video/ffmpeg-renderers/protocols/wlr-layer-shell-protocol.c \

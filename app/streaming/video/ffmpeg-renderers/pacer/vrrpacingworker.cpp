@@ -188,6 +188,11 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
         !m_Config.calibrationKey.empty()) {
         m_Config.calibrationKey += "-decoder-output-clock-v1";
     }
+    m_PredictiveDropEnabled = config.experimentalPredictiveDrop;
+    if (m_PredictiveDropEnabled) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Experimental predictive frame dropping enabled (revision 3, rolling mean)");
+        if (!m_Config.calibrationKey.empty()) m_Config.calibrationKey += "-predictive-drop-v3";
+    }
     const char* deepTraceEnv = SDL_getenv("MOONLIGHT_VRR_DEEP_TRACE");
     m_DeepTraceEnabled = deepTraceEnv != nullptr && deepTraceEnv[0] == '1';
 
@@ -394,6 +399,7 @@ int VrrPacingWorker::run()
             continue;
         }
         if (presentationSuspended()) {
+            m_PredictiveDrop.reset();
             if (frame) {
                 recordFrameCompletion(queuedFrame, VrrTimingDecision {},
                            VrrPresentFeedback {}, FrameTelemetry {},
@@ -492,6 +498,21 @@ int VrrPacingWorker::run()
                 decision, m_TimingController->displayPeriodUs(), ageUs, metronome, latencyFix)) {
             recordFrameCompletion(queuedFrame, decision, VrrPresentFeedback {}, telemetry,
                        TraceDisposition::Stale);
+            noteDrop();
+            m_TimingController->noteSubmission(false, false, 0);
+            continue;
+        }
+
+        if (m_PredictiveDropEnabled && m_PredictiveDrop.shouldDrop({
+                scheduleNowUs, frame.decodeCompleteUs(), decision.sourceTimeUs,
+                decision.sourcePeriodUs, decision.sourceIntervalUs,
+                m_TimingController->displayPeriodUs(), decision.targetUs,
+                decision.originalTargetUs, decision.rebased || externalRebaseApplied})) {
+            // waitForDecode may retain an exported mapping. Release that
+            // preparation state before retiring this decoded frame.
+            m_Presenter->cancelFrame();
+            recordFrameCompletion(queuedFrame, decision, VrrPresentFeedback {}, telemetry,
+                                  TraceDisposition::PredictiveDrop);
             noteDrop();
             m_TimingController->noteSubmission(false, false, 0);
             continue;
@@ -1093,6 +1114,16 @@ void VrrPacingWorker::recordSubmission(
         feedback.latchQpcCorrelationSpanTicks * 1000000 / feedback.latchRawSyncQpcFrequency :
         feedback.presentationUncertaintyUs;
     m_TimingController->notePresentation(observation);
+    if (m_PredictiveDropEnabled) {
+        if (observation.submitted && observation.idValid) {
+            m_PredictiveDrop.presented(observation.id, observation.submission,
+                                      m_TimingController->displayPeriodUs());
+        }
+        if (observation.sampleValid && observation.timeKind == Vrr13::PresentationTimeKind::DisplayEvent) {
+            m_PredictiveDrop.displayed(observation.sampleId, observation.sampleTime,
+                                      operationEndUs, m_TimingController->displayPeriodUs());
+        }
+    }
 }
 
 void VrrPacingWorker::deferFrame(PacedFrame&& frame)
@@ -1123,6 +1154,7 @@ void VrrPacingWorker::recordFrameCompletion(const QueuedFrame& queuedFrame,
         disposition == TraceDisposition::OutputDropped ||
         disposition == TraceDisposition::QueueCapacity ||
         disposition == TraceDisposition::Stale ||
+        disposition == TraceDisposition::PredictiveDrop ||
         disposition == TraceDisposition::PreparationFailed;
     if (m_Telemetry && playbackOutcome) {
         const auto& parameters = m_TimingController->parameters();
@@ -1705,6 +1737,8 @@ const char* VrrPacingWorker::traceDispositionName(
     switch (disposition) {
     case TraceDisposition::Presented:
         return "presented";
+    case TraceDisposition::PredictiveDrop:
+        return "predictive_drop";
     case TraceDisposition::OutputDropped:
         return "output_dropped";
     case TraceDisposition::QueueCapacity:

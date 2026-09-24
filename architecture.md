@@ -2206,3 +2206,88 @@ helper worker before stopping the connection. The selected physical controller
 is excluded from SDL gamepad forwarding. See [native controller notes](docs/native-steam-controller.md)
 for the experimental status and validation limits. Video and VRR policy are
 unchanged by this extension.
+
+### VA surface export cache trial (2026-09-23)
+`MOONLIGHT_VA_EXPORT_CACHE=1` enables a Direct YUV experiment. The renderer
+retains exported descriptors for fixed VA pools or the growable FFmpeg VA pool
+identified by its allocator opaque pointer (up to 128 surfaces), retains the
+frames-context reference, and duplicates FDs
+for each import. It does not retain all AVFrames or bypass per-frame
+`vaSyncSurface`. A pool change clears cached FDs before releasing the old pool;
+renderer destruction also clears the cache. Unknown allocators keep the
+uncached export path. The first fixed-pool-only candidate did not activate on
+this FFmpeg version; its lower observed p99 is not evidence of improvement. This targets measured multi-millisecond reader-dependency
+stalls in Intel Xe surface export; live latency and visual validation pending.
+
+### Predictive frame dropping trial (2026-09-23)
+
+The **Predictive frame dropping (experimental)** VRR setting enables a worker-owned admission policy before rendering, after decode synchronization. It never skips codec reference processing or changes FIFO/VRR/V-sync. A retained mapping is cancelled on a drop. Only matched actual display events anchor pending-submission predictions; absent/stale feedback disables decisions. A rolling 120-frame readiness-minus-source fit uses prior samples only, with startup and discontinuity guards. A late frame or estimated display backlog may be skipped only if its predicted interference with the next frame exceeds 2 ms and the fitted uncertainty. The next submitted frame is protected. Revision 2 removes the original 20-source-period cooldown; each subsequent eligible frame is reconsidered against the remaining display backlog. Existing genuine-overload rules remain separate. Calibration uses a separate key. Drops appear as `predictive_drop` in the CSV and are counted as playback drops.
+
+Tests cover steady input, isolated/paired delays, slower source, missing feedback, bounded drop rate and reset. A standalone FIFO model of a saved 7000-frame capture predicted roughly 2.7% drops, p99 10.53 to 10.10 ms, with display-gap p99 growing from 11.45 to 18.04 ms. Those are modeled survivor latencies, not measured improvement: the model omits variable compositor service and freezes readiness/controller targets. It is not the exact VRR replay engine, which does not yet model this opt-in policy. Do not report stock replay exactness as validation of the predictive policy. Live A/B and visual evaluation are required before enabling by default or packaging.
+
+Predictive-drop revision 2 (2026-09-23): all six deterministic regression suites, replay --help, and the dedicated policy test pass after the final build. The new regression requires two late arrivals four frames apart to both be eligible, with no consecutive predictive drops. The same 7000-frame approximate model predicts 6.6% drops and p99 9.57 ms (revision 1: 2.7%, 10.10 ms); display-gap p99 18.68 ms versus 18.04 ms. Live comparison pending; these are modeled values, not measured gains.
+
+Predictive-drop revision 3 (2026-09-23): readiness-minus-source prediction uses the arithmetic mean of the previous 120 observations, not the lower quartile. Ordinary long intervals and changes to the fitted source period no longer erase readiness or confirmed-display/pending-FIFO history. Missing timing returns without learning; an explicit epoch rebase or backward source timestamp still resets. Existing startup confidence, fresh-feedback, uncertainty, successor protection and interference tests remain. A dedicated regression repeats a double-length host interval followed by a late frame: all 30 events remain eligible without a 32-frame blind period. Six regression suites, replay --help and dedicated policy test passed after final rebuild. Staged candidate only; live validation pending.
+
+
+### Direct presentation explicit synchronization trial (2026-09-24)
+
+`MOONLIGHT_DIRECT_SYNCOBJ_DEVICE=/dev/dri/renderD128` opts into the standard
+linux-drm-syncobj-v1 protocol using the selected render node. This is currently
+an explicit machine-specific selection, not automatic multi-GPU discovery.
+Unsupported timeline synchronization fails direct initialization and uses the
+existing renderer fallback. Default without the variable remains implicit.
+
+Direct preparation already waits for VA decode completion (and RGB conversion
+completion when selected). Each submitted buffer now gets a separate syncobj
+with acquire point 1 signalled after preparation and release point 2 owned by
+the compositor. The AVFrame reference remains alive until that release point;
+wl_buffer.release is not treated as permission to reuse explicitly synchronized
+storage. Release points are polled without blocking during normal event pumping.
+Each buffer has its own timeline because releases can arrive out of order.
+Teardown retains the existing no-live-decoder ownership contract. RGB code is
+covered by the same synchronization logic but the current live trial is YUV.
+
+The goal is to avoid later decoder references extending an implicit DMA-buffer
+wait after the current frame is already ready. Gamescope traces showed 5–10 ms
+waits ending at later decoder completion, with negligible CPU wakeup delay.
+With explicit acquire points, essentially all streamed commits were accepted
+immediately. No blanket fence bypass or Gamescope source change is used.
+
+Overcooked 2, 4K120 HEVC 4:4:4 HDR, host 116 FPS: final 30-second windows in
+on/off/on order gave receive-complete-to-actual-flip means 6.061 / 8.274 / 6.009 ms
+and p99 7.066 / 9.413 / 7.046 ms. Predictive drop counts were 44 / 253 / 43 out
+of 3481 frames. These are survivor latency measurements from short sequential
+runs, not randomized or across-game results. A host resume hang required a
+Vibepollo service restart before the final enabled run. The first enabled
+window still had a 14.779 ms maximum; rare display-side waits remain.
+All six deterministic suites and replay help passed. Live statistics-overlay
+handoff to Vulkan and back to direct completed without decoder reset or new
+GPU/flip errors. Visual confirmation and RGB/multi-GPU validation remain open.
+Evidence: research/arc130v-k17/direct-scanout/explicit-sync-20260924.
+
+
+Correction to explicit-sync trial measurements: the disabled run fell back to
+Vulkan after its direct buffer pool stayed full for250ms (journal PID1671901,
+00:04:55). Therefore8.274/9.413 versus6.009/7.046 is not a valid same-renderer
+A/B result and does not establish the claimed synchronization benefit. The
+original archived client can also achieve6.18/7.08ms first-packet-to-flip with
+current event-driven host capture. Explicit sync acceptance traces remain
+valid evidence of removing an implicit acquire wait, but steady-state latency
+benefit and the buffer-retention failure require controlled validation.
+
+
+### Experimental drop setting and packaging (2026-09-24)
+
+Predictive dropping is now a persistent UI setting, off by default. Reconnect to
+apply a change. The former environment switch is no longer read. Normal decoder
+and overload handling remains unchanged; this switch controls only the new
+prediction-based skips. A Stellar Blade gameplay capture skipped 711 of 13,888
+frames (5.1%); receive-complete-to-flip averaged 7.22 ms with p99 9.69 ms, while
+display-gap p99 reached 18.65 ms. That tradeoff does not justify enabling it by
+default. These measurements are not a controlled on/off comparison.
+
+The checkbox, persisted default, session configuration and worker gate were built
+on Linux. Six deterministic VRR suites, replay help and the dedicated predictive
+policy test passed. The export cache and explicit-sync paths remain separate
+from this setting. Native-controller support is also retained in this branch.

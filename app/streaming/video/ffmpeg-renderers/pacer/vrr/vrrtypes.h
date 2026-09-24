@@ -18,6 +18,7 @@ extern "C" {
 }
 
 struct VrrSessionConfig {
+    bool experimentalPredictiveDrop = false;
     int displayRefreshHz = 0;
     int streamRateHz = 0;
     bool allowAdditionalQueuedFrame = false;

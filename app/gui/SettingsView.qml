@@ -933,6 +933,20 @@ Flickable {
 
                 CheckBox {
                     hoverEnabled: true
+                    text: qsTr("Predictive frame dropping (experimental)")
+                    font.pointSize: 12
+                    visible: StreamingPreferences.enableVrr
+                    enabled: StreamingPreferences.enableVsync && StreamingPreferences.enableVrr
+                    checked: StreamingPreferences.experimentalPredictiveDrop
+                    onCheckedChanged: StreamingPreferences.experimentalPredictiveDrop = checked
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("May skip a late frame to leave room for the next one. This can reduce delay but make motion less smooth. Off by default. Reconnect after changing it.")
+                }
+
+                CheckBox {
+                    hoverEnabled: true
                     text: qsTr("Reduce judder")
                     font.pointSize: 12
                     visible: StreamingPreferences.enableVrr
