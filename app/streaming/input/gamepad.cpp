@@ -5,6 +5,38 @@
 #include "settings/mappingmanager.h"
 
 #include <QtMath>
+#include <QSettings>
+#include <QFileInfo>
+#include <QDir>
+
+namespace {
+bool isNativeSteamGamepad(int deviceIndex)
+{
+    const auto vendor = SDL_JoystickGetDeviceVendor(deviceIndex);
+    const auto product = SDL_JoystickGetDeviceProduct(deviceIndex);
+    if (vendor != 0x28de) return false;
+    // The puck and the controller identity reported by Steam Input differ.
+    if (product == 0x1304 || product == 0x1302) return true;
+#ifdef Q_OS_LINUX
+    if (product == 0x11ff) {
+        const int slot = SDL_JoystickGetDevicePlayerIndex(deviceIndex);
+        if (slot < 0) return false;
+        auto path = qEnvironmentVariable("SDL_STEAM_VIRTUAL_GAMEPAD_INFO_FILE");
+        if (path.isEmpty()) path = QDir::homePath() + "/.local/share/Steam/config/virtualgamepadinfo.txt";
+        if (!QFileInfo::exists(path)) return false;
+        QSettings info(path, QSettings::IniFormat);
+        info.beginGroup(QString("slot %1").arg(slot));
+        bool vendorOk = false, productOk = false;
+        const auto actualVendor = info.value("VID").toString().toUInt(&vendorOk, 0);
+        const auto actualProduct = info.value("PID").toString().toUInt(&productOk, 0);
+        // Never discard all Steam virtual gamepads: another slot may be an Xbox.
+        return vendorOk && productOk && actualVendor == 0x28de &&
+               (actualProduct == 0x1302 || actualProduct == 0x1304);
+    }
+#endif
+    return false;
+}
+}
 
 // How long the Start button must be pressed to toggle mouse emulation
 #define MOUSE_EMULATION_LONG_PRESS_TIME 750
@@ -495,8 +527,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 
         // The native transport carries this device in full. Sending SDL's
         // reduced gamepad representation too creates a second host controller.
-        if (m_NativeSteam && SDL_JoystickGetDeviceVendor(event->which) == 0x28de &&
-            SDL_JoystickGetDeviceProduct(event->which) == 0x1304) {
+        if (m_NativeSteam && isNativeSteamGamepad(event->which)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Steam Controller reserved for native transport");
             return;
         }
@@ -1005,8 +1036,7 @@ int SdlInputHandler::getAttachedGamepadMask()
     count = mask = 0;
     int numJoysticks = SDL_NumJoysticks();
     for (int i = 0; i < numJoysticks; i++) {
-        if (m_NativeSteam && SDL_JoystickGetDeviceVendor(i) == 0x28de &&
-            SDL_JoystickGetDeviceProduct(i) == 0x1304) {
+        if (m_NativeSteam && isNativeSteamGamepad(i)) {
             continue;
         }
         if (SDL_IsGameController(i)) {
