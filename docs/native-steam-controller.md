@@ -35,14 +35,24 @@ arbitrary USB requests are not provided. Pending feature requests expire, and
 stream teardown removes the virtual controller.
 
 The current firmware's raw quaternion remains constant. Windows Steam Input
-calculates orientation from gyro/accelerometer data. Duplicate sensor timestamps
-are adjusted by the existing bounded timestamp normalizer, preserving button
-reports and preventing the observed Steam Input orientation resets.
+calculates orientation from gyro/accelerometer data. The report's sensor clock
+can also stop completely while trackpad reports continue. The helper supplies a
+continuous microsecond timestamp from the client's monotonic receive clock,
+anchored to the first hardware timestamp, with normal 32-bit wrap.
+
+The earlier workaround added one microsecond to repeated sensor timestamps and
+periodically reset its offset. A real capture contained 8,025 reports over 30
+seconds with a frozen sensor clock. That workaround compressed trackpad time and
+introduced backward jumps, corrupting Steam Input's trackball momentum on release.
+The revised clock preserves report contents and touch/release events, while
+representing elapsed receive time. Replaying that capture gives 29.9965 seconds
+and a median report interval of 3.997 ms. This does not timestamp the physical
+sensor sampling instant; it timestamps report receipt on the client.
 
 ## Validation
 
 The client and Windows host compile. Protocol bounds/direction tests pass under
-ASan/UBSan. The four IMU timestamp tests pass. An initial end-to-end synthetic run
+ASan/UBSan. The four receive-clock tests and three command-queue tests pass. An initial end-to-end synthetic run
 received 4,920 reports in the Windows HID viewer with zero malformed reports.
 Normal stream disconnect removed the virtual HID device. Physical testing then received 1,344 real reports in five seconds with zero
 malformed reports. Windows Steam Input recognized type 17 (Steam Controller 2026)
@@ -73,8 +83,8 @@ The physical-command queue holds at most 32 requests. Nonzero rumble/pulse
 commands waiting there for over 50 ms are rejected rather than played late.
 Stop commands and feature transactions are not treated as expiring haptic effects.
 This is a local queue-age limit, not a measurement of network transit time.
-Sensor timestamps remain in the input reports; independent computer clocks are
-not subtracted or used to reorder button edges.
+The forwarded report timestamps use client receive time as described above.
+Independent computer clocks are not subtracted or used to reorder button edges.
 
 Steam Input can expose the puck as a second, generic Steam Virtual Gamepad.
 Both startup enumeration and hotplug exclude that duplicate using Steam's
