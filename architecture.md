@@ -3832,3 +3832,14 @@ The checkbox, persisted default, session configuration and worker gate were buil
 on Linux. Six deterministic VRR suites, replay help and the dedicated predictive
 policy test passed. The export cache and explicit-sync paths remain separate
 from this setting. Native-controller support is also retained in this branch.
+
+## Native Steam Controller menu routing (2026-09-29)
+
+The Linux endpoint helper has optional stream-only single/double-tap Guide routing
+under `MOONMACHINE_GUIDE_TAPS=1`. It withholds only the Guide bit, emits a host
+Guide pulse after a 250 ms single-tap decision, and invokes local Steam for a
+double tap. A leased local Steam UI guard prevents the physical press opening
+the local menu first; it restores itself on helper loss. This does not change
+video pacing or other controller input. See
+[GUIDE-BUTTON.md](app/deploy/linux/native-controller/GUIDE-BUTTON.md) for
+dependencies, internal-API limitations and validation requirements.

@@ -6,6 +6,9 @@ import fcntl
 import selectors
 import pathlib
 import threading
+import time
+from guide_taps import GuideTaps
+from guide_guard import GuideGuard
 from imu_clock import ImuClock
 from controller_io import CommandWorker
 
@@ -57,16 +60,29 @@ def execute(op, data):
 
 worker = CommandWorker(execute, reply)
 pending = b''
+guide = GuideTaps()
+guard = GuideGuard() if os.environ.get("MOONMACHINE_GUIDE_TAPS") == "1" else None
 emit('READY')
 try:
     while True:
-        for key, _ in s.select():
+        active = guard is not None and guard.ready.is_set()
+        if not active:
+            guide.cancel()
+        timeout = guide.timeout(time.monotonic()) if active else None
+        # Also notice guard failure while the physical controller is idle.
+        if guard is not None:
+            timeout = min(timeout, .1) if timeout is not None else .1
+        for key, _ in s.select(timeout):
             if key.fd == fd:
                 try:
                     b = os.read(fd, 64)
                 except BlockingIOError:
                     continue
                 if b and b[0] in (0x42, 0x43, 0x44, 0x45, 0x79, 0x7b):
+                    if active:
+                        b, action = guide.receive(b, time.monotonic())
+                        if action == 'local':
+                            guard.local()
                     emit('I ' + clock.normalize(b).hex())
             else:
                 chunk = os.read(sys.stdin.fileno(), 65536)
@@ -81,7 +97,13 @@ try:
                         sys.exit(0)
                     _, seq, op, hexdata = line.decode().split()
                     worker.submit(seq, int(op), bytes.fromhex(hexdata))
+        if active:
+            report, action = guide.tick(time.monotonic())
+            if report is not None:
+                emit('I ' + clock.normalize(report).hex())
 finally:
+    if guard is not None:
+        guard.close()
     worker.close()
     print('Native USB commands: completed=%d expired=%d rejected=%d max_queue_ms=%.2f' %
           (worker.completed, worker.expired, worker.rejected, worker.max_wait * 1000),
