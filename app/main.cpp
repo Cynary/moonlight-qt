@@ -352,6 +352,7 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 #ifdef Q_OS_UNIX
 
 static int signalFds[2];
+static SDL_Thread* signalThread = nullptr;
 
 void handleSignal(int sig)
 {
@@ -413,6 +414,25 @@ int SDLCALL signalHandlerThread(void* data)
     return 0;
 }
 
+void stopSignalHandlers()
+{
+    if (!signalThread) {
+        return;
+    }
+
+    // No new work may reach SDL or Qt while those libraries are being torn down.
+    struct sigaction sa = {};
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    shutdown(signalFds[1], SHUT_RDWR);
+    SDL_WaitThread(signalThread, nullptr);
+    signalThread = nullptr;
+    close(signalFds[0]);
+    close(signalFds[1]);
+}
+
 void configureSignalHandlers()
 {
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalFds) == -1) {
@@ -423,8 +443,14 @@ void configureSignalHandlers()
     }
 
     // Create a thread to handle our signals safely outside of signal context
-    SDL_Thread* thread = SDL_CreateThread(signalHandlerThread, "Signal Handler", nullptr);
-    SDL_DetachThread(thread);
+    signalThread = SDL_CreateThread(signalHandlerThread, "Signal Handler", nullptr);
+    if (!signalThread) {
+        close(signalFds[0]);
+        close(signalFds[1]);
+        return;
+    }
+    // Registered after SDL_Quit, so explicit exit() paths stop the worker first.
+    atexit(stopSignalHandlers);
 
     struct sigaction sa = {};
     sa.sa_handler = handleSignal;
@@ -824,6 +850,9 @@ int main(int argc, char *argv[])
     // ensure Qt has already installed its VT signals before we override
     // some of them with our own.
     configureSignalHandlers();
+    struct SignalHandlerGuard {
+        ~SignalHandlerGuard() { stopSignalHandlers(); }
+    } signalHandlerGuard;
 #endif
 
 #ifdef Q_OS_WIN32
@@ -1110,6 +1139,10 @@ int main(int argc, char *argv[])
     // Give worker tasks time to properly exit. Fixes PendingQuitTask
     // sometimes freezing and blocking process exit.
     QThreadPool::globalInstance()->waitForDone(30000);
+
+#ifdef Q_OS_UNIX
+    stopSignalHandlers();
+#endif
 
     // Restore the default logger for all libraries before shutting down ours
 #if SDL_VERSION_ATLEAST(3, 0, 0)
