@@ -258,7 +258,7 @@ void testSourcePlayoutDelayOffsetsProjectedTargets()
                lowLatencyPolicy.playoutPrepareOnArrival == 0 &&
                lowLatencyPolicy.renderStartAfterSubmissionUs == 6000 &&
                lowLatencyPolicy.renderStartMinimumLeadUs == 2500 &&
-               lowLatencyPolicy.renderLeadFloorUs == 0 &&
+               lowLatencyPolicy.renderLeadFloorUs == 3000 &&
                lowLatencyPolicy.playoutSmoothingGainPerMille == 200 &&
                lowLatencyPolicy.playoutSmoothingPeriodAlphaPerMille == 100 &&
                lowLatencyPolicy.playoutSmoothingMaxLagUs == 6000 &&
@@ -2003,7 +2003,9 @@ void testFutureSourceProjectionReseedsPhase()
 
 void testMeasuredPreparationControlsRenderAllowance()
 {
-    const auto session = config(116, 120);
+    auto session = config(116, 120);
+    session.measuredRenderLead = true;
+    session.decoderOutputClock = true;
     VrrTimingController controller(session, true, vrrTimingParametersForSession(session));
     uint32_t count = 0;
     auto prepare = [&](uint64_t duration) {
@@ -4345,6 +4347,7 @@ void testPredictionOnlyBufferAdaptation()
     // Preserve the previous five-minute/3 ms law for historical replay.
     auto policy = vrrTimingParametersForSession(session);
     policy.playoutResponsiveBuffer = 0;
+    policy.renderLeadFloorUs = 3000; // Historical policy being replayed here.
     policy.playoutDelayMarginUs = 3000;
     expect(policy.playoutPredictionOnly == 1 && policy.playoutNativeHitchAdaptation == 0 &&
                policy.playoutReadinessDrivenAdaptation == 1 && policy.playoutDelayMarginUs == 3000,

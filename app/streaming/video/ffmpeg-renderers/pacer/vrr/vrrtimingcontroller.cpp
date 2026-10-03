@@ -80,9 +80,8 @@ constexpr uint64_t kRateCandidateMinimumUs = 200000;
 // Historical post-present acquisition spacing retains this minimum lead.
 // Production uses native acquisition backpressure without software spacing.
 constexpr uint64_t kRenderStartMinimumLeadUs = 2500;
-// Measured preparation already supplies the render tail; do not add a fixed
-// renderer-independent minimum on top of it.
-constexpr uint64_t kRenderLeadFloorUs = 0;
+// Retain upstream headroom unless the renderer uses measured preparation lead.
+constexpr uint64_t kRenderLeadFloorUs = 3000;
 // Consecutive frames that must map more than a period into the future before
 // the sender clock is considered to have jumped. One early outlier used to
 // re-seed the mapping on itself and make every following frame late.
@@ -193,7 +192,7 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.playoutResponsiveBuffer = config.readinessHitchFeedback ? 0 : 7;
     // Timeline mapping anchors to decode completion, absorbing hardware decode
     // duration into the sender offset instead of inflating client buffer delay.
-    parameters.playoutSourceMappingDecoderOutput = 0;
+    parameters.playoutSourceMappingDecoderOutput = config.decoderOutputClock ? 1 : 0;
     // Buffer transient work when measured service fits within intended time
     // over the qualified window. Include decoder waits and raw preparation
     // even when readiness-lead learning excludes them from generic render cost.
@@ -310,7 +309,7 @@ VrrTimingParameters vrrTimingParametersForSession(
     parameters.playoutPrepareOnArrival = 1;
     parameters.renderStartAfterSubmissionUs = 0;
     parameters.renderStartMinimumLeadUs = kRenderStartMinimumLeadUs;
-    parameters.renderLeadFloorUs = kRenderLeadFloorUs;
+    parameters.renderLeadFloorUs = config.measuredRenderLead ? 0 : kRenderLeadFloorUs;
     parameters.preparationInitialSampleExcluded = 1;
     // A source-rate epoch of at least 1.5x returns to the delay previously
     // sustained at that rate; decreases slew so a restore is not a jump.

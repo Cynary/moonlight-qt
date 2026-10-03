@@ -2267,7 +2267,7 @@ void testReconnectPreservesCompletedTraces()
     qputenv("MOONLIGHT_VRR_TRACE", "");
 }
 
-void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
+void testDeepTraceRequestsNativeObservationsWithoutChangingMode(bool decoderOutputClock = false)
 {
     resetFakeClock();
     QTemporaryDir traceDirectory;
@@ -2288,11 +2288,12 @@ void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
     auto cachedConfig = enabledConfig();
     cachedConfig.calibrationPath = traceDirectory.filePath("profile.json").toStdString();
     cachedConfig.calibrationKey = "replay-test";
+    cachedConfig.decoderOutputClock = decoderOutputClock;
     Vrr13::Reserve cachedHistory(20);
     for (int i = 0; i < 256; ++i)
         cachedHistory.observe(4000000, 8000000, Vrr13::Reserve::Second + int64_t(i) * 16667000);
     expect(Vrr13::saveProfile(QString::fromStdString(cachedConfig.calibrationPath),
-                             "replay-test", cachedHistory), "test calibration must save");
+                             decoderOutputClock ? "replay-test-decoder-output-clock-v1" : "replay-test", cachedHistory), "test calibration must save");
     {
         VrrPacingWorker worker(&backend, cachedConfig, &telemetry);
         expect(worker.start(), "worker must start for deep diagnostics testing");
@@ -2317,9 +2318,12 @@ void testDeepTraceRequestsNativeObservationsWithoutChangingMode()
     expect(columns.size() == fields.size(), "diagnostic columns must align with every value");
     expect(columns.contains("decoder_output_us") &&
                fields.value(columns.indexOf("decoder_output_us")).toULongLong() > 0 &&
-               fields.value(columns.indexOf("decoder_output_us")).toULongLong() ==
-                   fields.value(columns.indexOf("decode_complete_us")).toULongLong(),
-           "a frame without a blocking fence wait must keep decoder output as its readiness boundary");
+               (decoderOutputClock ?
+                    fields.value(columns.indexOf("decode_complete_us")).toULongLong() >=
+                        fields.value(columns.indexOf("dequeue_us")).toULongLong() :
+                    fields.value(columns.indexOf("decoder_output_us")).toULongLong() ==
+                        fields.value(columns.indexOf("decode_complete_us")).toULongLong()),
+           "readiness must use the observed boundary only when decoder-output clock mapping is enabled");
     expect(fields.value(columns.indexOf("session_latency_mode")) ==
                QByteArray::number(cachedConfig.latencyMode) &&
                fields.value(columns.indexOf("calibration_loaded")) == "1" &&
@@ -2778,6 +2782,7 @@ int main()
     testFailedCancellationNativeEvidenceIsTraced();
     testReconnectPreservesCompletedTraces();
     testDeepTraceRequestsNativeObservationsWithoutChangingMode();
+    testDeepTraceRequestsNativeObservationsWithoutChangingMode(true);
     testTraceCapturesAllowTearingWithoutChangingController();
 
     exportWarmHistoryReplayFixture();

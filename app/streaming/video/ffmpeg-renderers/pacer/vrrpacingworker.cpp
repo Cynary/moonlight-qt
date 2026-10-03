@@ -160,15 +160,6 @@ bool isUncPath(const QString& path)
 }
 #endif
 
-VrrTimingParameters workerTimingParameters(const VrrSessionConfig& config)
-{
-    auto parameters = vrrTimingParametersForSession(config);
-#ifdef __linux__
-    parameters.playoutSourceMappingDecoderOutput = 1;
-#endif
-    return parameters;
-}
-
 } // namespace
 
 VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
@@ -181,7 +172,7 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
                            presenter->canLatchAdaptivePresent()),
     m_TimingController(std::make_unique<VrrTimingController>(
         config, m_CanLatchPresentation,
-        workerTimingParameters(config)))
+        vrrTimingParametersForSession(config)))
 {
     if (m_TimingController->parameters().playoutSourceMappingDecoderOutput &&
         !m_Config.calibrationKey.empty()) {

@@ -91,4 +91,3 @@ WL_PRIVATE const struct wl_interface wp_linux_drm_syncobj_surface_v1_interface =
 	3, wp_linux_drm_syncobj_surface_v1_requests,
 	0, NULL,
 };
-

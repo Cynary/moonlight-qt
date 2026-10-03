@@ -307,6 +307,10 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps,
     // rejection continues through the original fixed path below.
     if (enableVrr) {
         VrrSessionConfig config;
+#ifdef __linux__
+        config.decoderOutputClock = true;
+        config.measuredRenderLead = true;
+#endif
         config.experimentalPredictiveDrop = QSettings().value("experimentalpredictivedrop", false).toBool();
         // The production queue policy is shared across native backends.
         config.readinessHitchFeedback = false;
