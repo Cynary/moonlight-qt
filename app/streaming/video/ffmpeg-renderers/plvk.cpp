@@ -1556,14 +1556,14 @@ uint64_t PlVkRenderer::waitForDecode(AVFrame* frame)
     // can block for milliseconds behind driver work, before the required
     // synchronization even begins. Time the existing sync without adding
     // another driver call to the frame-delivery path.
+    if (hasReadyDrmFrame(frame)) {
+        return 0;
+    }
     const auto cpuBeforeSync = m_GpuTrace ? GpuTrace::ThreadSample::capture() : GpuTrace::ThreadSample{};
     if (m_GpuTrace) {
         const auto now = LiGetMicroseconds();
         m_GpuTrace->record({"decode_sync_enter", frame->pts, uint64_t(frame->pkt_dts),
             now, now, surface});
-    }
-    if (hasReadyDrmFrame(frame)) {
-        return 0;
     }
     clearReadyDrmFrame();
     const uint64_t startUs = LiGetMicroseconds();

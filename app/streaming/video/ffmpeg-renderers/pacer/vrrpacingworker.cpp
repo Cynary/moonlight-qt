@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -1439,10 +1440,30 @@ int VrrPacingWorker::traceThreadProc(void* context)
     return static_cast<VrrPacingWorker*>(context)->traceRun();
 }
 
+void VrrPacingWorker::snapshotRollingTrace(bool force)
+{
+    if (m_RollingTracePath.isEmpty()) return;
+    const auto now = LiGetMicroseconds();
+    if (!force && now - m_RollingTraceCheckUs < 250000) return;
+    m_RollingTraceCheckUs = now;
+    while (!m_RollingTraceRows.empty() && now - m_RollingTraceRows.front().first > 180000000)
+        m_RollingTraceRows.pop_front();
+    const auto request = m_RollingTracePath + QStringLiteral(".snapshot");
+    if (!force && !QFileInfo::exists(request)) return;
+    QSaveFile out(m_RollingTracePath + QStringLiteral(".recent.csv"));
+    if (!out.open(QIODevice::WriteOnly)) return;
+    if (out.write(kTraceHeader) != sizeof(kTraceHeader) - 1) return;
+    for (const auto& row : m_RollingTraceRows) {
+        if (out.write(row.second) != row.second.size()) return;
+    }
+    if (out.commit()) QFile::remove(request);
+}
+
 int VrrPacingWorker::traceRun()
 {
     TraceRow row;
     while (true) {
+        snapshotRollingTrace();
         if (m_TraceQueue->pop(row)) {
             if (m_TraceAcceptingRows.load() ||
                     (m_TraceStopping.load() && !m_TraceWriteFailed && !m_TraceSizeCapped))
@@ -1456,6 +1477,7 @@ int VrrPacingWorker::traceRun()
                 if (!m_TraceWriteFailed && !m_TraceSizeCapped) writeTraceRow(row);
                 continue;
             }
+            snapshotRollingTrace(true);
             if (m_TraceFormat == TraceFormat::ChunkedCompressed) {
                 flushTraceChunk();
             }
@@ -1901,6 +1923,15 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     addUnsigned(row.decodeHoldUs);
     line.append('\n');
 
+    if (!m_RollingTracePath.isEmpty()) {
+        const auto now = LiGetMicroseconds();
+        m_RollingTraceRows.emplace_back(now, std::move(line));
+        while (m_RollingTraceRows.size() > 100000 ||
+               (!m_RollingTraceRows.empty() && now - m_RollingTraceRows.front().first > 180000000))
+            m_RollingTraceRows.pop_front();
+        return;
+    }
+
     if (m_TraceFormat == TraceFormat::ChunkedCompressed) {
         m_TraceDecodedHash.addData(line);
         m_TraceChunk.append(line);
@@ -2046,6 +2077,9 @@ void VrrPacingWorker::openTraceIfRequested()
     }
 
 #endif
+
+    if (qEnvironmentVariable("MOONLIGHT_VRR_TRACE_ROLLING") == QLatin1String("1"))
+        m_RollingTracePath = tracePath;
 
     // The launcher owns one path for the application lifetime, while each
     // reconnect creates a new worker. Preserve the completed connection before

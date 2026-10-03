@@ -206,6 +206,7 @@ private:
     void openTraceIfRequested();
     void closeTrace();
     int traceRun();
+    void snapshotRollingTrace(bool force = false);
     void writeTraceRow(const TraceRow& row);
     void flushTraceChunk(bool enforceSizeCap = true);
     bool minimumTraceDurationCaptured() const;
@@ -263,6 +264,9 @@ private:
     bool m_RebaseOnNextFrame = false;
     uint32_t m_RebaseOnNextFrameFlags = 0;
     bool m_DeepTraceEnabled = false;
+    QString m_RollingTracePath;
+    std::deque<std::pair<uint64_t, QByteArray>> m_RollingTraceRows;
+    uint64_t m_RollingTraceCheckUs = 0;
     std::FILE* m_TraceFile = nullptr;
     SDL_Thread* m_TraceThread = nullptr;
     std::unique_ptr<Vrr13::TraceQueue<TraceRow, 8192>> m_TraceQueue;

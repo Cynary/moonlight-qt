@@ -2502,6 +2502,42 @@ void testTraceCapturesAllowTearingWithoutChangingController()
     }
 }
 
+void testRollingTraceSnapshot()
+{
+    resetFakeClock();
+    QTemporaryDir dir;
+    const QString path = dir.filePath("rolling.csv");
+    SDL_setenv("MOONLIGHT_VRR_TRACE", QFile::encodeName(path).constData(), 1);
+    SDL_setenv("MOONLIGHT_VRR_TRACE_ROLLING", "1", 1);
+    FakeVrrFramePresenter backend;
+    PacerTelemetry telemetry;
+    TrackedFrameLifetime first, second;
+    auto snapshot = [&]() {
+        QFile request(path + ".snapshot");
+        expect(request.open(QIODevice::WriteOnly), "snapshot request must open");
+        request.close();
+        expect(waitFor([&]{ return !QFile::exists(path + ".snapshot"); }), "snapshot request must finish");
+        return readExpandedTrace(path + ".recent.csv");
+    };
+    {
+        VrrPacingWorker worker(&backend, enabledConfig(), &telemetry);
+        expect(worker.start(), "rolling trace worker must start");
+        worker.submit(frame(1, first));
+        expect(backend.waitForPresentCount(1), "first rolling frame must present");
+        const auto initial = snapshot();
+        expect(initial.split('\n').size() >= 3, "snapshot must contain frame data");
+        g_TestClockOffsetUs.fetch_add(181000000);
+        const auto expired = snapshot();
+        expect(expired.split('\n').size() == 2, "paused stale window must expire");
+        worker.submit(frame(2, second));
+        expect(backend.waitForPresentCount(2), "recording must continue after snapshot and long pause");
+        expect(snapshot().split('\n').size() >= 3, "subsequent snapshot must contain resumed frames");
+    }
+    SDL_setenv("MOONLIGHT_VRR_TRACE_ROLLING", "0", 1);
+    SDL_setenv("MOONLIGHT_VRR_TRACE", "", 1);
+    resetFakeClock();
+}
+
 void testTraceQueueConcurrency()
 {
     Vrr13::TraceQueue<uint64_t, 4> bounded;
@@ -2735,6 +2771,7 @@ int main()
         "the mean-miss score must fall only when the average exceeds one millisecond");
     expect(Vrr13::ReadinessWindow::meanMissScore(averageWindow.snapshot(32000000)) == 100.0,
         "expired misses must not depress the current mean-miss score");
+    testRollingTraceSnapshot();
     testTraceQueueConcurrency();
     testReadinessWindow();
     SDL_SetMainReady();
